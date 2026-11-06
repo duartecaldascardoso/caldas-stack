@@ -29,7 +29,10 @@ const KEYS = {
   "1": "column-1", "2": "column-2", "3": "column-3", "4": "column-4", "5": "column-5",
 };
 
-const HINT = "←→↑↓ move · ⇧ moves card · n new · e edit · d delete · ⌘z undo · [ ] board · b new board · ⇧d delete board";
+const HINTS = [["←→↑↓", "move"], ["⇧", "move card"], ["n", "new"], ["e", "edit"], ["d", "delete"], ["⌘Z", "undo"], ["[ ]", "board"], ["b", "new board"]];
+// Each column's dot, from the theme's palette.
+const COLUMN_TINTS = ["ansi5", "ansi4", "ansi3", "ansi6", "ansi2"];
+const alpha = (color, hex) => (/^#[0-9a-f]{6}$/i.test(color) ? color + hex : color);
 
 const fileOf = (board) => `${DIR}/${board}.md`;
 
@@ -446,44 +449,60 @@ export default class Kanban extends View {
     const t = theme();
     const font = settings().font_family;
     return v_flex().id("kanban").track_focus(this.handle).on_key_down((e, cx) => this.onKey(e, cx))
-      .size_full().px(20).pt(14).pb(12).gap(14).bg(t.popover).text_color(t.foreground).text_size(13)
+      .size_full().px(18).pt(16).pb(12).gap(14).bg(t.canvas).text_color(t.foreground).text_size(13)
       .when(Boolean(font), (el) => el.font_family(font))
-      .child(this.renderBoards(t))
-      .child(h_flex().flex_1().min_h(0).gap(16).children(COLUMNS.map((name, c) => this.renderColumn(t, name, c))))
-      .child(h_flex().text_size(11).child(this.renderHint(t)));
+      .child(this.renderTop(t))
+      .child(h_flex().flex_1().min_h(0).gap(12).children(COLUMNS.map((name, c) => this.renderColumn(t, name, c))))
+      .child(this.renderHint(t));
   }
 
-  renderBoards(t) {
+  // Board tabs on the left, progress on the right.
+  renderTop(t) {
     const editingName = this.editing?.kind === "board";
     const tab = (board) => {
       const active = board === this.board;
-      return div().id(`board-${board}`).px(8).py(4).rounded(5).cursor_pointer()
-        .text_color(active ? t.foreground : t.dim).when(active, (el) => el.bg(t.raised))
+      return h_flex().id(`board-${board}`).h(26).px(10).gap(6).items_center().rounded(6).cursor_pointer()
+        .text_color(active ? t.foreground : t.muted).when(active, (el) => el.bg(t.raised))
         .hover((s) => s.text_color(t.foreground))
         .on_click((_e, cx) => { this.openBoard(board, cx); this.handle.focus(); })
-        .child(board === this.project ? `${board} ·` : board);
+        .child(board)
+        .when(board === this.project, (el) => el.child(div().size(5).rounded(3).bg(t.accent)));
     };
-    const add = div().id("board-new").px(8).py(4).rounded(5).cursor_pointer()
-      .text_color(t.dim).hover((s) => s.text_color(t.foreground))
+    const add = h_flex().id("board-new").h(26).w(26).justify_center().items_center().rounded(6).cursor_pointer()
+      .text_color(t.dim).hover((s) => s.text_color(t.foreground).bg(t.hover))
       .on_click((_e, cx) => this.startEdit({ kind: "board" }, "", cx))
       .child("+");
-    return h_flex().items_center().gap(2)
-      .children(this.boards.map(tab))
-      .child(editingName ? div().w(160).ml(4).child(this.renderInput(t, "new-board")) : add);
+    const total = this.lanes.reduce((n, lane) => n + lane.length, 0);
+    const done = this.lanes[COLUMNS.length - 1].length;
+    return h_flex().items_center().gap(12)
+      .child(h_flex().p(3).gap(2).items_center().rounded(8).border_1().border_color(t.border).bg(t.background)
+        .children(this.boards.map(tab))
+        .child(editingName ? div().w(160).child(this.renderInput(t, "new-board")) : add))
+      .child(div().flex_1())
+      .when(total > 0, (el) => el.child(h_flex().gap(10).items_center().text_size(11.5).text_color(t.dim)
+        .child(`${done}/${total} done`)
+        .child(div().w(96).h(4).rounded(2).bg(t.border)
+          .child(div().h_full().rounded(2).bg(t.ansi2).w(Math.round((96 * done) / total))))));
   }
 
   renderColumn(t, name, c) {
     const active = c === this.col;
     const cards = this.lanes[c];
     const adding = this.editing?.kind === "card" && this.editing.col === c && this.editing.row === null;
-    return v_flex().id(`col-${c}`).flex_1().min_w(0).h_full().gap(8)
+    const tint = t[COLUMN_TINTS[c]];
+    return v_flex().id(`col-${c}`).flex_1().min_w(0).h_full().rounded(10).border_1()
+      .border_color(active ? alpha(t.accent, "66") : t.border).bg(t.background)
       .on_click((_e, cx) => { if (!active) { this.col = c; this.handle.focus(); cx.notify(); } })
-      .child(h_flex().px(12).pb(6).items_baseline().gap(6).border_b_1().border_color(active ? t.accent : t.border)
-        .child(div().text_size(12).text_color(active ? t.foreground : t.dim).child(name.toLowerCase()))
-        .child(div().text_size(11).text_color(t.dim).child(cards.length ? String(cards.length) : "")))
-      .child(v_flex().id(`cards-${c}`).flex_1().min_h(0).overflow_y_scrollbar().gap(2)
+      .child(h_flex().px(12).pt(12).pb(10).gap(8).items_center()
+        .child(div().size(8).rounded(4).bg(tint))
+        .child(div().flex_1().text_size(12.5).font_semibold().text_color(active ? t.foreground : t.muted).child(name))
+        .child(div().px(7).py(1).rounded(8).bg(t.raised).text_size(11).text_color(t.dim).child(String(cards.length))))
+      .child(v_flex().id(`cards-${c}`).flex_1().min_h(0).overflow_y_scrollbar().px(8).pb(8).gap(6)
         .children(cards.map((text, r) => this.renderCard(t, c, r, text)))
-        .when(adding, (el) => el.child(this.renderInput(t, `new-${c}`))));
+        .when(adding, (el) => el.child(this.renderInput(t, `new-${c}`)))
+        .when(!cards.length && !adding, (el) => el.child(div().mx(4).py(14).flex().justify_center().rounded(8)
+          .border_1().border_color(alpha(t.border, "99")).text_size(12).text_color(t.dim)
+          .child(active ? "n to add a card" : "No cards"))));
   }
 
   renderCard(t, c, r, text) {
@@ -492,58 +511,67 @@ export default class Kanban extends View {
     const selected = !editing && c === this.col && r === this.rows[c];
     const done = c === COLUMNS.length - 1;
     const link = cardLink(text);
-    return h_flex().id(`card-${c}-${r}`).rounded(6).bg(selected ? t.selected : t.popover)
-      .cursor_pointer().hover((s) => s.bg(selected ? t.selected : t.hover))
+    return v_flex().id(`card-${c}-${r}`).px(12).py(10).gap(8).rounded(8).border_1().cursor_pointer()
+      .border_color(selected ? t.accent : t.border).bg(selected ? t.selected : t.raised)
+      .hover((s) => s.border_color(selected ? t.accent : t.input))
       .on_click((event, cx) => {
         this.col = c;
         this.rows[c] = r;
         if (event.click_count > 1) this.startEdit({ kind: "card", col: c, row: r }, text, cx);
         else { this.handle.focus(); cx.notify(); }
       })
-      .child(div().w(2).h_full().rounded(1).bg(selected ? t.accent : t.popover))
-      .child(div().flex_1().min_w(0).px(10).py(7)
-        .text_color(done ? t.dim : selected ? t.foreground : t.muted)
-        .child(withoutLink(text)))
-      .when(Boolean(link), (el) => el.child(this.renderLink(t, link, this.statusOf(text), done)));
+      .child(div().text_color(done ? t.muted : t.foreground).child(withoutLink(text)))
+      .when(Boolean(link), (el) => el.child(h_flex().child(this.renderLink(t, link, this.statusOf(text), done))));
   }
 
   // The card's pull request as a chip: a dot for its state, the number, then checks and review.
   renderLink(t, link, status, done) {
-    const chip = h_flex().mr(8).px(7).py(2).gap(6).items_center().flex_none().rounded(5).bg(t.raised).text_size(11);
+    const chip = h_flex().px(7).py(2).gap(6).items_center().flex_none().rounded(5).bg(t.background).border_1().border_color(t.border).text_size(11);
     if (link.branch) return chip.text_color(done ? t.dim : t.muted).child(`⎇ ${link.branch}`);
-    const state = { open: t.ansi2, draft: t.dim, merged: t.ansi5, closed: t.ansi1 }[status?.state] ?? t.border;
+    const state = { open: t.ansi2, draft: t.dim, merged: t.ansi5, closed: t.ansi1 }[status?.state] ?? t.dim;
     const checks = { passing: ["✓", t.ansi2], failing: ["✗", t.ansi1], pending: ["•", t.ansi3] }[status?.checks];
     const review = { approved: ["approved", t.ansi2], changes: ["changes", t.ansi1] }[status?.review];
     return chip
       .child(div().size(6).rounded(3).bg(state))
-      .child(div().text_color(done ? t.dim : t.foreground).child(`#${link.pr}`))
+      .child(div().text_color(done ? t.muted : t.foreground).child(`#${link.pr}`))
+      .when(Boolean(status), (el) => el.child(div().text_color(t.dim).child(status.state)))
       .when(Boolean(checks), (el) => el.child(div().text_color(checks[1]).child(checks[0])))
       .when(Boolean(review), (el) => el.child(div().text_color(review[1]).child(review[0])));
   }
 
   renderInput(t, id) {
-    return div().id(id).h(32).px(10).flex().items_center().rounded(6).bg(t.background)
+    return div().id(id).h(36).px(12).flex().items_center().rounded(8).bg(t.background)
       .border_1().border_color(t.accent)
       .child(Input.new(this.input).w_full().text_color(t.foreground));
   }
 
+  // Keys as keycaps. Asks and the selected card's state come first, in words.
   renderHint(t) {
+    const line = h_flex().h(22).gap(14).items_center().text_size(11.5).text_color(t.dim);
     if (this.confirmingDelete) {
-      return div().text_color(t.blocked).child(`Delete board "${this.board}"? y to confirm, any other key cancels`);
+      return line.child(div().text_color(t.blocked).child(`Delete board "${this.board}"?`)).child(this.keys(t, [["y", "delete"], ["any key", "cancel"]]));
     }
     if (this.confirmingPr) {
       const { branch, title } = this.confirmingPr;
-      return div().text_color(t.accent).child(`Push ${branch} and open a pull request "${title}"? y to confirm, any other key cancels`);
+      return line.child(div().text_color(t.accent).child(`Push ${branch} and open a pull request "${title}"?`)).child(this.keys(t, [["y", "open"], ["any key", "cancel"]]));
     }
-    if (this.editing) return div().text_color(t.dim).child("enter save · esc cancel");
-    const offer = this.project && !this.boards.includes(this.project) ? `p board for ${this.project} · ` : "";
+    if (this.editing) return line.child(this.keys(t, [["↵", "save"], ["esc", "cancel"]]));
     const card = this.lanes[this.col][this.rows[this.col]];
     const link = card != null ? cardLink(card) : null;
     const status = link?.pr && this.statusOf(card);
-    const about = card == null ? ""
-      : link?.pr ? `${status ? describe(link.pr, status) : `#${link.pr}`} · g open diff · `
-      : link?.branch ? "g open diff · o open pull request · "
-      : this.repoFor(this.board) ? "@ link branch · o open pull request · " : "";
-    return div().text_color(t.dim).child(offer + about + HINT);
+    const linked = card == null ? []
+      : link ? [["g", "open diff"], ...(link.branch ? [["o", "open pull request"]] : [])]
+      : this.repoFor(this.board) ? [["@", "link branch"], ["o", "open pull request"]] : [];
+    const offer = this.project && !this.boards.includes(this.project) ? [["p", `board for ${this.project}`]] : [];
+    return line
+      .when(Boolean(status), (el) => el.child(div().text_color(t.muted).child(describe(link.pr, status))))
+      .child(this.keys(t, [...offer, ...linked, ...HINTS]));
+  }
+
+  keys(t, pairs) {
+    const cap = (key) => div().h(18).min_w(18).px(5).flex().items_center().justify_center().rounded(4)
+      .border_1().border_color(t.border).bg(t.background).text_size(10.5).text_color(t.muted).child(key);
+    return h_flex().gap(14).items_center().children(pairs.map(([key, label]) =>
+      h_flex().gap(5).items_center().child(cap(key)).child(label)));
   }
 }
