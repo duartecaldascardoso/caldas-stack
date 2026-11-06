@@ -1,14 +1,15 @@
 // kanban-md: plain-text kanban boards for Herdr, one markdown file per board in ~/kanban.
 import { View, div } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input } from "gpui-base";
-import { home, props, closeOverlay, readTextFile, writeTextFile, exec, focused, settings, theme } from "herdr";
+import { home, props, openOverlay, closeOverlay, readTextFile, writeTextFile, exec, focused, notify, settings, theme } from "herdr";
 import {
   COLUMNS, emptyLanes, parse, serialize, boardName,
-  addCard, editCard, removeCard, shiftCard, reorderCard,
+  addCard, editCard, removeCard, shiftCard, reorderCard, cardLink, withoutLink,
 } from "./board.js";
 
 const DIR = `${home()}/kanban`;
 const TRASH = `${DIR}/.trash`;
+const REPOS = `${DIR}/.repos.json`; // board name -> repository folder, learnt from project boards
 const DEFAULT_BOARD = "main";
 const POLL_MS = 3000; // picks up edits made to the files elsewhere
 const HISTORY_LIMIT = 200;
@@ -22,6 +23,7 @@ const KEYS = {
   "cmd-z": "undo", "cmd-shift-z": "redo",
   "[": "prev-board", "shift-tab": "prev-board", "]": "next-board", "tab": "next-board",
   "b": "new-board", "p": "project-board", "shift-d": "delete-board", "escape": "close",
+  "g": "open-diff", "shift-2": "link", "@": "link",
   "1": "column-1", "2": "column-2", "3": "column-3", "4": "column-4", "5": "column-5",
 };
 
@@ -42,6 +44,8 @@ export default class Kanban extends View {
     this.boards = [];
     this.board = storedBoard() ?? DEFAULT_BOARD;
     this.project = null; // the focused terminal's git repository name, if any
+    this.projectRoot = null; // and its folder
+    this.repos = {};
     this.lanes = emptyLanes();
     this.raw = null; // the file as last read or written, to detect edits made elsewhere
     this.col = 0;
@@ -58,7 +62,12 @@ export default class Kanban extends View {
 
     cx.spawn(async (cx) => {
       await exec("mkdir", ["-p", DIR]);
+      this.repos = JSON.parse(await readTextFile(REPOS).catch(() => null) ?? "{}");
       this.project = await this.detectProject();
+      if (this.project && this.repos[this.project] !== this.projectRoot) {
+        this.repos = { ...this.repos, [this.project]: this.projectRoot };
+        await writeTextFile(REPOS, JSON.stringify(this.repos, null, 2), await readTextFile(REPOS).catch(() => null)).catch(() => {});
+      }
       await this.refresh(cx);
       if (this.boards.includes(this.project)) this.openBoard(this.project, cx);
     });
@@ -73,6 +82,7 @@ export default class Kanban extends View {
     const git = await exec("git", ["-C", cwd, "rev-parse", "--show-toplevel"]).catch(() => null);
     const root = git?.code === 0 ? git.stdout.trim() : cwd;
     if (root === home() || root === "/") return null;
+    this.projectRoot = root;
     return boardName(root.split("/").pop());
   }
 
@@ -264,12 +274,51 @@ export default class Kanban extends View {
       case "new-board": return this.startEdit({ kind: "board" }, "", cx);
       case "project-board": return this.project && this.createBoard(this.project, cx);
       case "delete-board": this.confirmingDelete = true; return cx.notify();
+      case "open-diff": return this.openDiff(lanes[col][row]);
+      case "link": return this.linkBranch(cx);
       case "close": return props()?.overlay && closeOverlay(props().overlay);
       default: {
         const column = action.match(/^column-(\d)$/);
         if (column) this.moveCursor(Number(column[1]) - 1 - col, 0, cx);
       }
     }
+  }
+
+  // Links: a card's pull request or branch opens in snappy-diff.
+
+  repoFor(board) {
+    return this.repos[board] ?? this.projectRoot;
+  }
+
+  openDiff(card) {
+    const link = card && cardLink(card);
+    if (!link) return;
+    const repo = this.repoFor(this.board);
+    if (!repo) {
+      notify({ title: "No repository for this board", body: "Open the board from a terminal inside the project once.", level: "warning" });
+      return;
+    }
+    openOverlay({
+      mod: "snappy-diff", kind: "dialog", modal: true, width: 0.96, height: 0.92,
+      props: link.pr ? { repo, pr: link.pr } : { repo, head: link.branch },
+    });
+  }
+
+  // Links the selected card to the branch the focused terminal is on: its pull request
+  // when it has one, the branch itself otherwise.
+  linkBranch(cx) {
+    const { lanes, col } = this;
+    const row = this.rows[col];
+    const card = lanes[col][row];
+    const repo = this.projectRoot;
+    if (card == null || !repo) return;
+    cx.spawn(async (cx) => {
+      const branch = (await exec("git", ["-C", repo, "rev-parse", "--abbrev-ref", "HEAD"])).stdout.trim();
+      const pr = await exec("gh", ["pr", "view", "--json", "number", "-q", ".number"], { cwd: repo }).catch(() => null);
+      const token = pr?.code === 0 && pr.stdout.trim() ? `#${pr.stdout.trim()}` : `@${branch}`;
+      const old = cardLink(card)?.token;
+      this.apply(editCard(this.lanes, col, row, old ? card.replace(old, token) : `${card} ${token}`), cx);
+    });
   }
 
   // View
@@ -323,6 +372,7 @@ export default class Kanban extends View {
     if (editing?.kind === "card" && editing.col === c && editing.row === r) return this.renderInput(t, `edit-${c}-${r}`);
     const selected = !editing && c === this.col && r === this.rows[c];
     const done = c === COLUMNS.length - 1;
+    const link = cardLink(text);
     return h_flex().id(`card-${c}-${r}`).rounded(6).bg(selected ? t.selected : t.popover)
       .cursor_pointer().hover((s) => s.bg(selected ? t.selected : t.hover))
       .on_click((event, cx) => {
@@ -334,7 +384,9 @@ export default class Kanban extends View {
       .child(div().w(2).h_full().rounded(1).bg(selected ? t.accent : t.popover))
       .child(div().flex_1().min_w(0).px(10).py(7)
         .text_color(done ? t.dim : selected ? t.foreground : t.muted)
-        .child(text));
+        .child(withoutLink(text)))
+      .when(Boolean(link), (el) => el.child(div().mr(8).px(6).py(1).flex_none().rounded(4).bg(t.raised).text_size(11)
+        .text_color(done ? t.dim : t.accent).child(link?.pr ? `#${link.pr}` : `⎇ ${link?.branch}`)));
   }
 
   renderInput(t, id) {
@@ -349,6 +401,8 @@ export default class Kanban extends View {
     }
     if (this.editing) return div().text_color(t.dim).child("enter save · esc cancel");
     const offer = this.project && !this.boards.includes(this.project) ? `p board for ${this.project} · ` : "";
-    return div().text_color(t.dim).child(offer + HINT);
+    const card = this.lanes[this.col][this.rows[this.col]];
+    const link = card != null && (cardLink(card) ? "g open diff · " : this.projectRoot ? "@ link branch · " : "");
+    return div().text_color(t.dim).child(offer + (link || "") + HINT);
   }
 }

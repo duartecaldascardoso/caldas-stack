@@ -76,3 +76,21 @@ export function reorderCard(lanes, col, row, step) {
   [lane[row], lane[to]] = [lane[to], lane[row]];
   return { lanes: lanes.map((l, i) => (i === col ? lane : l)), col, row: to };
 }
+
+// What a card is linked to: a pull request ("#42", or its GitHub URL) or a branch
+// ("@feature/login"). The link stays in the card's text, so the file remains plain markdown.
+export function cardLink(text) {
+  const url = text.match(/https:\/\/github\.com\/[^\s]+\/pull\/(\d+)/);
+  if (url) return { pr: Number(url[1]), token: url[0] };
+  const pr = text.match(/(?:^|\s)#(\d+)\b/);
+  if (pr) return { pr: Number(pr[1]), token: `#${pr[1]}` };
+  const branch = text.match(/(?:^|\s)@([\w./-]+[\w-])/);
+  if (branch) return { branch: branch[1], token: `@${branch[1]}` };
+  return null;
+}
+
+// The card's text without its link, for showing the link apart.
+export function withoutLink(text) {
+  const link = cardLink(text);
+  return link ? text.replace(link.token, "").replace(/\s{2,}/g, " ").trim() : text;
+}

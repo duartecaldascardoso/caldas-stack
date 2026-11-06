@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   COLUMNS, emptyLanes, parse, serialize, boardName,
-  addCard, editCard, removeCard, shiftCard, reorderCard,
+  addCard, editCard, removeCard, shiftCard, reorderCard, cardLink, withoutLink,
 } from "../mods/kanban-md/board.js";
 
 const lanes = (...cards) => COLUMNS.map((_, i) => cards[i] ?? []);
@@ -70,4 +70,13 @@ test("edits never mutate the lanes they are given", () => {
   shiftCard(before, 0, 0, 1);
   reorderCard(before, 0, 0, 1);
   assert.deepEqual(before, copy);
+});
+
+test("cardLink finds a pull request or a branch in the card's text", () => {
+  assert.deepEqual(cardLink("Fix login #42"), { pr: 42, token: "#42" });
+  assert.deepEqual(cardLink("Review https://github.com/o/r/pull/7/files"), { pr: 7, token: "https://github.com/o/r/pull/7" });
+  assert.deepEqual(cardLink("Try @feature/login-v2 first"), { branch: "feature/login-v2", token: "@feature/login-v2" });
+  assert.equal(cardLink("Issue#3 is not a link, nor is mail@x"), null);
+  assert.equal(withoutLink("Fix login #42 today"), "Fix login today");
+  assert.equal(withoutLink("No link"), "No link");
 });
