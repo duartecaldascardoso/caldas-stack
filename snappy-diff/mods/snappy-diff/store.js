@@ -9,7 +9,7 @@ const DIR = `${appHome()}/data/snappy-diff`;
 const PREFS = `${DIR}/prefs.json`;
 const LAST_REVIEWED = `${DIR}/last-reviewed.json`; // "repo:base...head" -> the head commit you last reviewed
 
-export const DEFAULT_PREFS = { diffStyle: "split", sidebar: true, editor: "zed" };
+export const DEFAULT_PREFS = { diffStyle: "split", sidebar: true, editor: "zed", wholeFiles: false };
 
 async function readJson(path, fallback) {
   try { return { ...fallback, ...JSON.parse(await fs.readFile(path, "utf8")) }; } catch { return fallback; }

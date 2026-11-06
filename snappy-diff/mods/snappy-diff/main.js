@@ -1,14 +1,16 @@
 // snappy diff for Herdr: review a branch like a pull request, without leaving the window.
 import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input, Scrollbar, v_virtual_list, VirtualListScrollHandle } from "gpui-base";
-import { props, closeOverlay, focused, notify, agents, panes, hc, settings, theme } from "herdr";
+import { props, closeOverlay, focused, notify, agents, panes, hc, appHome, exec, settings, theme } from "herdr";
+import * as fs from "fs/promises";
 import * as git from "./git.js";
 import { parsePatch, skippedFiles, firstChange } from "./patch.js";
 import { languageOf } from "./syntax.js";
 import { fileRows, wrapCount, wrapLines, segments } from "./rows.js";
 import { treeRows, fileMatches, breakdown } from "./tree.js";
 import { findMoves, isMoved } from "./moved.js";
-import { reviewKey, rangeKey, sinceReview, emptyReview, isViewed, changedSinceViewed, toggleViewed, linesText, withStatus, reviewPrompt } from "./review.js";
+import { areas, effort, hints, reviewOrder } from "./insights.js";
+import { reviewKey, rangeKey, sinceReview, emptyReview, isViewed, changedSinceViewed, toggleViewed, linesText, withStatus, reviewPrompt, reviewPayload } from "./review.js";
 import { DEFAULT_PREFS, readPrefs, writePrefs, readReview, writeReview, readLastReviewed, writeLastReviewed } from "./store.js";
 
 const ICONS = "mods/snappy-diff/icons";
@@ -82,6 +84,9 @@ export default class SnappyDiff extends View {
     this.editing = null; // the comment being written: { id, file, side, start, end }
     this.pr = null; // the pull request under review, with the head ref it was fetched to
     this.lastReviewed = {}; // range -> the head commit last reviewed there
+    this.overview = false;
+    this.overviewPrefix = ""; // the folder the overview's "where" panel is in
+    this.churn = new Map(); // path -> commits of the range that touched it
 
     this.handle = cx.focus_handle();
     this.scroll = VirtualListScrollHandle.new();
@@ -197,6 +202,35 @@ export default class SnappyDiff extends View {
       this.error = String(e.message ?? e);
     }
     this.loading = false;
+    this.rebuild();
+    cx.notify();
+    if (this.prefs.wholeFiles) this.loadWholeFiles(cx);
+  }
+
+  // Whole files: every file's text, with every separator open. Files too big, binary, new or
+  // deleted are left as they are.
+  loadWholeFiles(cx) {
+    const worktree = !this.source.head && !this.source.commit;
+    const wanted = this.files.filter((f) => !f.binary && !f.tooLarge && !f.large && f.hunks.length && f.type !== "new" && f.type !== "deleted")
+      .filter((f) => !this.expanded.get(f.id)?.lines);
+    const openAll = (f, lines) => this.expanded.set(f.id, { lines, gaps: new Set(f.hunks.map((_, i) => i).concat(f.hunks.length)) });
+    for (const f of this.files) { const known = this.expanded.get(f.id); if (known?.lines) openAll(f, known.lines); }
+    cx.spawn(async (cx) => {
+      for (let i = 0; i < wanted.length; i += 8) {
+        await Promise.all(wanted.slice(i, i + 8).map(async (f) => {
+          const text = await git.fileText(this.source.repo, f, worktree).catch(() => null);
+          if (text != null) openAll(f, text.replaceAll("\t", "    ").split("\n"));
+        }));
+      }
+      this.rebuild();
+      cx.notify();
+    });
+  }
+
+  setWholeFiles(on, cx) {
+    this.setPref("wholeFiles", on, cx);
+    if (on) return this.loadWholeFiles(cx);
+    this.expanded = new Map();
     this.rebuild();
     cx.notify();
   }
@@ -399,8 +433,9 @@ export default class SnappyDiff extends View {
     if (next) this.jumpToFile(next.id, cx);
   }
 
+  // The most important file not yet viewed: contracts, tests, code, config, docs.
   reviewNext(cx) {
-    const pending = this.shown().filter((f) => !isViewed(this.review, f));
+    const pending = reviewOrder(this.shown()).filter((f) => !isViewed(this.review, f));
     const active = this.activeFile()?.id;
     const next = pending.find((f) => f.id !== active) ?? pending[0];
     if (next) this.jumpToFile(next.id, cx);
@@ -554,6 +589,41 @@ export default class SnappyDiff extends View {
     });
   }
 
+  // Comments for the pull request: open ones not posted yet.
+  unsentComments() {
+    return this.prShown() ? this.comments.filter((c) => !c.outdated && !c.sent) : [];
+  }
+
+  prShown() {
+    return Boolean(this.pr) && this.pr.head === this.source?.head && !this.source.commit && !this.source.since;
+  }
+
+  // Posts the comments to the pull request as one review, through gh, and marks them sent.
+  sendToGitHub(cx) {
+    const comments = this.unsentComments();
+    if (!comments.length || this.posting) return;
+    this.posting = true;
+    cx.notify();
+    cx.spawn(async (cx) => {
+      const file = `${appHome()}/data/snappy-diff/github-review.json`;
+      try {
+        await fs.mkdir(`${appHome()}/data/snappy-diff`, { recursive: true });
+        await fs.writeFile(file, JSON.stringify(reviewPayload(this.pr.headRefOid, comments, this.files)));
+        const result = await exec("gh", ["api", `repos/{owner}/{repo}/pulls/${this.pr.number}/reviews`, "--method", "POST", "--input", file], { cwd: this.source.repo });
+        if (result.code !== 0) throw new Error((result.stderr || result.stdout).trim().split("\n").pop());
+        const sent = new Set(comments.map((c) => c.id));
+        this.setReview({ ...this.review, comments: this.review.comments.map((c) => (sent.has(c.id) ? { ...c, sent: true } : c)) });
+        this.rebuild();
+        notify({ title: `Posted ${plural(comments.length, "comment")} on #${this.pr.number}`, body: this.pr.title, level: "success", timeout: 3000 });
+      } catch (e) {
+        notify({ title: "Couldn't post the review", body: String(e.message ?? e), level: "error" });
+      } finally {
+        this.posting = false;
+        cx.notify();
+      }
+    });
+  }
+
   copyReview(cx) {
     const open = this.comments.filter((c) => !c.outdated);
     if (!open.length) return;
@@ -572,11 +642,28 @@ export default class SnappyDiff extends View {
     if (overlay) closeOverlay(overlay);
   }
 
+  // Overview: the diff at a glance.
+
+  openOverview(cx) {
+    this.overview = !this.overview;
+    this.overviewPrefix = "";
+    this.menu = null;
+    this.handle.focus();
+    cx.notify();
+    if (this.overview && this.source?.head) {
+      cx.spawn(async (cx) => {
+        this.churn = await git.churn(this.source.repo, this.source.since || this.source.base, this.source.head);
+        cx.notify();
+      });
+    }
+  }
+
   // Keys
 
   onKey(event, cx) {
     const k = event.keystroke;
     if (this.palette) return this.paletteKey(k, cx);
+    if (this.overview && k === "escape") { this.overview = false; cx.notify(); return cx.stop_propagation(); }
     if (this.menu) return this.menuKey(k, cx);
     if (this.editing) {
       if (k === "escape") { this.cancelComment(cx); cx.stop_propagation(); }
@@ -665,6 +752,7 @@ export default class SnappyDiff extends View {
       { label: `Ignore whitespace: ${s.ignoreWhitespace ? "On" : "Off"}`, pick: (cx) => this.reload({ ignoreWhitespace: !s.ignoreWhitespace }, cx) },
       { label: `Open files in: ${EDITORS[this.prefs.editor]}`, pick: (cx) => this.setPref("editor", next(Object.keys(EDITORS), this.prefs.editor), cx) },
       { label: `Sidebar: ${this.prefs.sidebar ? "Shown" : "Hidden"}`, pick: (cx) => this.setPref("sidebar", !this.prefs.sidebar, cx) },
+      { label: `Whole files: ${this.prefs.wholeFiles ? "On" : "Off"}`, pick: (cx) => this.setWholeFiles(!this.prefs.wholeFiles, cx) },
     ];
   }
 
@@ -729,6 +817,9 @@ export default class SnappyDiff extends View {
       ["Collapse or expand all files", "", (cx) => this.toggleAll(cx)],
       [`${s.ignoreWhitespace ? "Show" : "Ignore"} whitespace changes`, "", (cx) => this.reload({ ignoreWhitespace: !s.ignoreWhitespace }, cx)],
       ["Reload", "", (cx) => this.reload({}, cx)],
+      ["Overview", "", (cx) => this.openOverview(cx)],
+      [`${this.prefs.wholeFiles ? "Folded" : "Whole"} files`, "", (cx) => this.setWholeFiles(!this.prefs.wholeFiles, cx)],
+      ...(this.unsentComments().length ? [["Send comments to GitHub", "", (cx) => this.sendToGitHub(cx)]] : []),
     ].filter(([label]) => !query || label.toLowerCase().includes(query.toLowerCase()))
       .map(([label, hint, run]) => ({ label, hint: hint || "action", run }));
     return [...files, ...commits, ...actions];
@@ -817,6 +908,7 @@ export default class SnappyDiff extends View {
         .child(this.renderMain(t, code, active)))
       .on_mouse_down("left", (e) => { if (e.bounds) this.viewBounds = e.bounds; })
       .when(Boolean(this.menu) && Boolean(this.source), (el) => el.child(this.renderMenu(t)))
+      .when(this.overview, (el) => el.child(this.renderOverview(t)))
       .when(Boolean(this.palette), (el) => el.child(this.renderPalette(t)))
       // Measures the code font's character width, which wrapping is computed from.
       .child(div().id("probe").absolute().top(-100).left(0).opacity(0).whitespace_nowrap().text_size(CODE_SIZE)
@@ -903,6 +995,10 @@ export default class SnappyDiff extends View {
         .child(h_flex().id("clear-comments").h(28).w(28).justify_center().items_center().rounded_r(6).border_1().border_l_0().border_color(t.border)
           .cursor_pointer().text_color(t.muted).hover((st) => st.bg(t.hover)).on_click((_e, cx) => this.setReview({ ...this.review, comments: [] }) || (this.rebuild(), cx.notify()))
           .child(icon("x", 12))))
+      .when(this.unsentComments().length > 0, (el) => el.child(h_flex().id("github").h(28).px(10).gap(6).items_center().rounded(6).border_1().border_color(t.border)
+        .cursor_pointer().text_size(12).hover((st) => st.bg(t.hover)).on_click((_e, cx) => this.sendToGitHub(cx))
+        .child(icon("pull", 13)).child(this.posting ? "Sending…" : `GitHub (${this.unsentComments().length})`)))
+      .when(files.length > 0, (el) => el.child(this.button("overview", icon("chart"), (cx) => this.openOverview(cx), { active: this.overview })))
       .child(this.button("collapse", icon(files.length && files.every((f) => this.isCollapsed(f)) ? "expand" : "collapse"), (cx) => this.toggleAll(cx)))
       .child(this.button("style", icon(this.prefs.diffStyle === "split" ? "split" : "unified"), (cx) => this.setPref("diffStyle", this.prefs.diffStyle === "split" ? "unified" : "split", cx)))
       .child(this.button("settings", icon("settings"), (cx) => this.openMenu("settings", cx), { active: this.menu === "settings" }));
@@ -1141,6 +1237,7 @@ export default class SnappyDiff extends View {
         .child(h_flex().gap(8).text_size(11.5).text_color(t.dim)
           .child(icon("comment", 12))
           .child(div().flex_1().child(c.start === c.end ? `Line ${c.end}` : `Lines ${c.start}–${c.end}`))
+          .when(Boolean(c.sent), (el) => el.child(div().px(6).rounded(4).bg(t.raised).text_color(t.muted).child("on GitHub")))
           .child(div().w(46).flex().justify_end().text_color(t.muted).child("Edit"))
           .child(div().w(46).flex().justify_end().text_color(t.muted).child("Delete")))
         .child(div().text_size(13).text_color(t.foreground).child(c.text)));
@@ -1155,6 +1252,125 @@ export default class SnappyDiff extends View {
           .child(div().flex_1().text_color(t.dim).child(`${lines} · ↵ to save, esc to cancel`))
           .child(div().w(70).flex().justify_end().text_color(t.muted).child("Cancel"))
           .child(div().w(76).py(4).flex().justify_center().rounded(6).bg(t.solid).text_color(t.solid_foreground).child("Comment"))));
+  }
+
+  renderOverview(t) {
+    const files = this.files;
+    const seen = (f) => isViewed(this.review, f);
+    const work = effort(files, this.moves, seen);
+    const kinds = breakdown(files);
+    const add = files.reduce((n, f) => n + f.add, 0);
+    const del = files.reduce((n, f) => n + f.del, 0);
+    const count = (type) => files.filter((f) => (type === "rename" ? f.type.startsWith("rename") : f.type === type)).length;
+    const viewed = files.filter(seen).length;
+    const progress = work.lines ? Math.round((work.viewedLines / work.lines) * 100) : 100;
+    const open = this.comments.filter((c) => !c.outdated).length;
+    const addressed = this.comments.length - open;
+    const prefix = this.overviewPrefix;
+    const where = areas(files, prefix, seen);
+    const largest = [...files].sort((a, b) => b.add + b.del - (a.add + a.del)).slice(0, 8);
+    const flags = hints(files, this.churn);
+    const s = this.source;
+    const subject = s.commit ? `commit ${s.commit.slice(0, 7)}` : `${s.since ? s.since.slice(0, 7) : s.base}...${s.head || "working tree"}`;
+    const leave = (cx) => { this.overview = false; this.handle.focus(); cx.notify(); };
+    const n = (v) => v.toLocaleString();
+
+    const bar = (a, d, max, width = 140) => h_flex().w(width).h(6).gap(2).flex_none()
+      .when(a > 0, (el) => el.child(div().h_full().rounded(2).bg(t.ansi2).w(Math.max(2, Math.round((width * a) / max)))))
+      .when(d > 0, (el) => el.child(div().h_full().rounded(2).bg(t.ansi1).w(Math.max(2, Math.round((width * d) / max)))));
+    const tile = (label, value, note, extra) => v_flex().flex_1().min_w(0).p(12).gap(4).rounded(8).border_1().border_color(t.border).bg(t.background)
+      .child(div().text_size(11.5).text_color(t.dim).child(label))
+      .child(div().text_size(20).font_semibold().child(value))
+      .when(Boolean(extra), (el) => el.child(extra))
+      .child(div().text_size(11.5).text_color(t.dim).truncate().child(note));
+    const panel = (title, aside, body) => v_flex().min_w(0).p(14).gap(10).rounded(8).border_1().border_color(t.border).bg(t.background)
+      .child(h_flex().gap(8).items_center().child(div().flex_1().text_size(13).font_medium().child(title)).when(Boolean(aside), (el) => el.child(aside)))
+      .child(body);
+    const row = (id, onClick) => h_flex().id(id).h(30).px(8).gap(10).items_center().rounded(6).cursor_pointer().hover((st) => st.bg(t.hover))
+      .on_click((_e, cx) => onClick(cx));
+    const name = (path) => {
+      const slash = path.lastIndexOf("/", path.length - 2);
+      return h_flex().flex_1().min_w(0).truncate()
+        .when(slash >= 0, (el) => el.child(div().text_color(t.muted).child(path.slice(0, slash + 1))))
+        .child(div().child(path.slice(slash + 1)));
+    };
+    const maxArea = Math.max(1, ...where.map((a) => Math.max(a.add, a.del)));
+    const maxFile = Math.max(1, ...largest.map((f) => Math.max(f.add, f.del)));
+    const maxKind = Math.max(1, ...kinds.map((k) => Math.max(k.add, k.del)));
+    const crumbs = prefix.split("/").filter(Boolean);
+
+    const whereBody = v_flex().gap(1).children(where.map((a, i) => row(`area-${i}`, (cx) => {
+      if (a.deeper) { this.overviewPrefix = a.path; cx.notify(); return; }
+      leave(cx);
+      this.focusFile(files.find((f) => f.name === a.path).id, cx);
+    })
+      .child(name(a.name + (a.deeper ? "/" : "")))
+      .child(div().w(70).flex().justify_end().text_size(11.5).text_color(t.dim).child(plural(a.files, "file")))
+      .child(bar(a.add, a.del, maxArea))
+      .child(div().w(54).flex().justify_end().text_size(11.5).text_color(a.viewed === a.files ? t.ansi2 : t.dim).child(`${a.viewed}/${a.files}`))));
+    const breadcrumb = h_flex().gap(4).text_size(11.5).text_color(t.dim)
+      .child(div().id("crumb-root").cursor_pointer().hover((st) => st.text_color(t.foreground)).on_click((_e, cx) => { this.overviewPrefix = ""; cx.notify(); }).child("all"))
+      .children(crumbs.map((part, i) => h_flex().gap(4).child("/").child(div().id(`crumb-${i}`).cursor_pointer().hover((st) => st.text_color(t.foreground))
+        .on_click((_e, cx) => { this.overviewPrefix = `${crumbs.slice(0, i + 1).join("/")}/`; cx.notify(); }).child(part))));
+
+    return div().absolute().inset_0().flex().justify_center().py(36).bg(alpha(t.background, "b3"))
+      .on_mouse_down("left", (_e, cx) => leave(cx))
+      .child(v_flex().id("overview").w(1040).h_full().rounded(12).border_1().border_color(t.border).bg(t.popover).shadow_lg()
+        .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
+        .child(h_flex().px(20).py(14).gap(12).items_center().border_b_1().border_color(t.border)
+          .child(v_flex().flex_1().min_w(0).gap(2)
+            .child(div().text_size(15).font_semibold().child("Overview"))
+            .child(div().text_size(12).text_color(t.dim).font_family(settings().font_family).truncate().child(subject)))
+          .when(viewed < files.length, (el) => el.child(h_flex().id("review-next").h(30).px(12).gap(6).items_center().rounded(6).bg(t.solid)
+            .text_color(t.solid_foreground).text_size(12.5).cursor_pointer().on_click((_e, cx) => { leave(cx); this.reviewNext(cx); })
+            .child("Review next file")))
+          .child(this.button("overview-close", icon("x"), (cx) => leave(cx))))
+        .child(v_flex().id("overview-body").flex_1().min_h(0).overflow_y_scrollbar().p(18).gap(14)
+          .child(h_flex().gap(10)
+            .child(tile("Files", n(files.length), [count("new") && `${count("new")} new`, count("change") && `${count("change")} changed`, count("deleted") && `${count("deleted")} deleted`, count("rename") && `${count("rename")} renamed`].filter(Boolean).join(" · ")))
+            .child(tile("Lines", h_flex().gap(8).child(div().text_color(t.ansi2).child(`+${n(add)}`)).child(div().text_color(t.ansi1).child(`−${n(del)}`)),
+              [`${n(work.lines)} to read`, work.moved && `${n(work.moved)} moved`, work.skipped && `${n(work.skipped)} generated`].filter(Boolean).join(" · ")))
+            .child(tile("Review time", work.minutes < 60 ? `~${work.minutes} min` : `~${Math.floor(work.minutes / 60)} h ${work.minutes % 60} min`, "at 400 lines an hour"))
+            .child(tile("Reviewed", `${progress}%`, `${viewed} of ${plural(files.length, "file")} viewed`,
+              div().h(4).w_full().rounded(2).bg(t.border).child(div().h_full().rounded(2).bg(t.ansi2).w(Math.round(2 * progress)))))
+            .child(tile("Comments", n(open), addressed ? `${addressed} addressed` : open ? "open" : "none yet")))
+          .child(h_flex().gap(12).items_start()
+            .child(div().flex_1().min_w(0).child(panel("Where", breadcrumb, whereBody)))
+            .child(div().w(330).flex_none().child(panel("Kinds", null, v_flex().gap(1).children(kinds.map((k) => row(`kind-${k.id}`, (cx) => {
+              leave(cx);
+              this.filterInput.set_value(`is:${k.id}`);
+              this.filter = `is:${k.id}`;
+              if (!this.prefs.sidebar) this.setPref("sidebar", true, cx);
+              cx.notify();
+            }).child(div().flex_1().child(k.label)).child(bar(k.add, k.del, maxKind, 110))
+              .child(div().w(80).flex().justify_end().text_size(11.5).text_color(t.dim).child(`+${n(k.add)} −${n(k.del)}`))))))))
+          .child(h_flex().gap(12).items_start()
+            .child(div().flex_1().min_w(0).child(panel("Largest files", null, v_flex().gap(1).children(largest.map((f, i) => row(`large-${i}`, (cx) => { leave(cx); this.focusFile(f.id, cx); })
+              .child(badge(f.name, t))
+              .child(h_flex().flex_1().min_w(0).gap(8)
+                .child(div().flex_none().child(f.name.split("/").pop()))
+                .child(div().min_w(0).truncate().text_size(11.5).text_color(t.dim).child(f.name.includes("/") ? f.name.slice(0, f.name.lastIndexOf("/")) : "")))
+              .child(bar(f.add, f.del, maxFile, 110))
+              .child(div().w(84).flex().justify_end().text_size(11.5).text_color(t.dim).child(`+${n(f.add)} −${n(f.del)}`)))))))
+            .child(div().flex_1().min_w(0).child(panel("Worth a closer look", null, flags.length
+              ? v_flex().gap(10).children(flags.map((h) => v_flex().gap(4)
+                .child(h_flex().gap(8).items_center().child(div().size(6).rounded(3).bg(t.ansi3)).child(div().text_size(12.5).child(h.label)))
+                .child(div().pl(14).text_size(11.5).text_color(t.dim).child(h.detail))
+                .when(h.files.length > 0, (el) => el.child(h_flex().pl(14).gap(6).flex_wrap().children(h.files.slice(0, 6).map((f, i) =>
+                  div().id(`hint-${h.id}-${i}`).px(6).py(1).rounded(4).bg(t.raised).text_size(11).text_color(t.muted).cursor_pointer()
+                    .hover((st) => st.text_color(t.foreground)).on_click((_e, cx) => { leave(cx); this.focusFile(f.id, cx); })
+                    .child(f.name.split("/").pop())))))))
+              : div().text_size(12).text_color(t.dim).child("Nothing stands out.")))))
+          .when(this.commits.length > 0, (el) => {
+            const maxCommit = Math.max(1, ...this.commits.map((c) => Math.max(c.add, c.del)));
+            return el.child(panel("Commits", div().text_size(11.5).text_color(t.dim).child(`${plural(this.commits.length, "commit")} · ${plural(new Set(this.commits.map((c) => c.author)).size, "author")}`),
+              v_flex().gap(1).children(this.commits.slice(0, 50).map((c, i) => row(`commit-${i}`, (cx) => { leave(cx); this.reload({ commit: c.sha }, cx); })
+                .when(c.sha === s.commit, (r) => r.bg(t.selected))
+                .child(div().w(64).flex_none().text_size(11.5).text_color(t.dim).font_family(settings().font_family).child(c.sha.slice(0, 7)))
+                .child(div().flex_1().min_w(0).truncate().child(c.subject))
+                .child(div().w(150).flex_none().truncate().text_size(11.5).text_color(t.dim).child(`${c.author}, ${c.date}`))
+                .child(bar(c.add, c.del, maxCommit, 90))))));
+          })));
   }
 
   renderPalette(t) {

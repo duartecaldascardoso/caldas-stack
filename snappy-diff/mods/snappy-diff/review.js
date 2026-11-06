@@ -57,6 +57,22 @@ export function withStatus(comments, files) {
   });
 }
 
+// The comments as a GitHub pull request review (POST /repos/{owner}/{repo}/pulls/{n}/reviews),
+// posted as one review of the commit under review. Removed lines are on the left side.
+export function reviewPayload(commitId, comments, files) {
+  const byId = new Map(files.map((f) => [f.id, f]));
+  return {
+    commit_id: commitId,
+    event: "COMMENT",
+    body: "",
+    comments: comments.map((c) => {
+      const side = c.side === "old" ? "LEFT" : "RIGHT";
+      const comment = { path: byId.get(c.file)?.name ?? c.file, line: c.end, side, body: c.text };
+      return c.start < c.end ? { ...comment, start_line: c.start, start_side: side } : comment;
+    }),
+  };
+}
+
 // The comments as a prompt for a coding agent: one numbered item per comment, pointing at
 // `path:line`, with the code and the ask. `subject` names what was reviewed.
 export function reviewPrompt(subject, comments, files) {

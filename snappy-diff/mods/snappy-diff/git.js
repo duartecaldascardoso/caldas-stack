@@ -146,3 +146,12 @@ export async function fileText(repo, file, worktree) {
   }
   return worktree ? readTextFile(`${repo}/${file.name}`) : null;
 }
+
+// How many commits of base..head touched each file: path -> count.
+export async function churn(repo, base, head) {
+  const counts = new Map();
+  if (!head || isOption(base) || isOption(head)) return counts;
+  const out = await git(repo, ["log", "--format=", "--name-only", "--max-count=500", `${base}..${head}`, "--"]).catch(() => "");
+  for (const path of out.split("\n").filter(Boolean)) counts.set(path, (counts.get(path) ?? 0) + 1);
+  return counts;
+}

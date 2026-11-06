@@ -51,6 +51,19 @@ export function fileRows(file, style, lang, expanded = null) {
       }
     }
   });
+  // After the last change: only known once the file's text is loaded.
+  const lines = expanded?.lines;
+  const last = file.hunks.at(-1);
+  const total = lines ? lines.length - (lines.at(-1) === "" ? 1 : 0) : 0;
+  const after = lines ? Math.max(0, total - (shownTo - 1)) : 0;
+  if (after && expanded.gaps.has(file.hunks.length)) {
+    const offset = last.newStart + last.newCount - (last.oldStart + last.oldCount);
+    const texts = lines.slice(shownTo - 1, total);
+    highlight(lang, texts).forEach((tokens, i) => {
+      const n = shownTo + i;
+      rows.push(contextRow({ kind: "ctx", text: texts[i], old: n - offset, new: n, tokens, marks: null }));
+    });
+  } else if (after) rows.push({ t: "hunk", hunk: file.hunks.length, hidden: after, context: "" });
   return rows;
 }
 

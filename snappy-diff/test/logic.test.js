@@ -257,3 +257,43 @@ test("sinceReview counts the commits on top of the tip you last reviewed", async
   assert.equal(rangeKey({ repo: "/r", base: "main", head: "feat", commit: "c2" }), null);
   assert.equal(rangeKey({ repo: "/r", base: "main", head: "feat" }), "/r:main...feat");
 });
+
+test("fileRows offers the lines after the last change once the file's text is known", () => {
+  const app = parsePatch(PATCH)[0]; // last change ends at new line 12
+  const lines = [...Array.from({ length: 15 }, (_, i) => `line ${i + 1}`), ""];
+  const closed = fileRows(app, "split", null, { lines, gaps: new Set() });
+  assert.deepEqual(closed.at(-1), { t: "hunk", hunk: 2, hidden: 3, context: "" });
+  const open = fileRows(app, "split", null, { lines, gaps: new Set([2]) });
+  assert.deepEqual(open.slice(-3).map((r) => [r.left.n, r.right.n, r.right.text]), [[12, 13, "line 13"], [13, 14, "line 14"], [14, 15, "line 15"]]);
+});
+
+test("reviewPayload turns comments into one GitHub review", async () => {
+  const { reviewPayload } = await import("../mods/snappy-diff/review.js");
+  const files = [{ id: "a.js", name: "a.js" }];
+  const payload = reviewPayload("abc", [
+    { file: "a.js", side: "new", start: 3, end: 3, text: "Why?" },
+    { file: "a.js", side: "old", start: 5, end: 7, text: "Keep this" },
+  ], files);
+  assert.deepEqual(payload, { commit_id: "abc", event: "COMMENT", body: "", comments: [
+    { path: "a.js", line: 3, side: "RIGHT", body: "Why?" },
+    { path: "a.js", line: 7, side: "LEFT", body: "Keep this", start_line: 5, start_side: "LEFT" },
+  ] });
+});
+
+test("insights: areas, effort, hints and review order", async () => {
+  const { areas, effort, hints, reviewOrder } = await import("../mods/snappy-diff/insights.js");
+  const files = [
+    { id: "src/api/types.ts", name: "src/api/types.ts", add: 10, del: 0, type: "change" },
+    { id: "src/app.js", name: "src/app.js", add: 300, del: 50, type: "change" },
+    { id: "package.json", name: "package.json", add: 1, del: 1, type: "change" },
+    { id: "yarn.lock", name: "yarn.lock", add: 900, del: 0, type: "change", generated: true },
+    { id: "README.md", name: "README.md", add: 2, del: 0, type: "change" },
+  ];
+  const none = () => false;
+  assert.deepEqual(areas(files, "", none).map((a) => [a.path, a.files]), [["yarn.lock", 1], ["src/", 2], ["package.json", 1], ["README.md", 1]]);
+  assert.deepEqual(areas(files, "src/", none).map((a) => a.path), ["src/app.js", "src/api/"]);
+  const work = effort(files, { perFile: new Map([["src/app.js", 50]]) }, (f) => f.id === "README.md");
+  assert.deepEqual(work, { lines: 314, skipped: 900, moved: 50, viewedLines: 2, minutes: 47 });
+  assert.deepEqual(hints(files, new Map()).map((h) => h.id), ["deps", "tests"]);
+  assert.deepEqual(reviewOrder(files).map((f) => f.name), ["src/api/types.ts", "src/app.js", "package.json", "README.md", "yarn.lock"]);
+});
