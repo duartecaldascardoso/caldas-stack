@@ -1,0 +1,155 @@
+#!/usr/bin/env node
+// kanban: read and change the boards in ~/kanban from a terminal or an agent, keeping the
+// file in the format the board reads. Uses the board's own parsing and editing.
+import { execFileSync } from "node:child_process";
+import { existsSync, readdirSync, readFileSync, renameSync, writeFileSync, mkdirSync } from "node:fs";
+import { homedir } from "node:os";
+import { basename, join } from "node:path";
+import { COLUMNS, parse, serialize, addCard, editCard, removeCard, cardLink, withoutLink } from "../mods/kanban-md/board.js";
+
+const DIR = process.env.KANBAN_DIR ?? join(homedir(), "kanban");
+
+const USAGE = `kanban: plain-text kanban boards in ${DIR.replace(homedir(), "~")}
+
+  kanban [show]                  the board, cards numbered
+  kanban boards                  every board
+  kanban add <column> <text>     add a card to a column
+  kanban move <card> <column>    move a card (by number, or a unique part of its text)
+  kanban done <card>             move a card to done
+  kanban edit <card> <text>      change a card's text
+  kanban link <card> <#n|@branch> link a card to a pull request or a branch
+  kanban rm <card>               delete a card
+
+  -b, --board <name>   the board (default: the git repository you are in, else main)
+  columns: ${COLUMNS.map((c) => c.toLowerCase()).join(", ")}`;
+
+class UsageError extends Error {}
+
+function fail(message) {
+  throw new UsageError(message);
+}
+
+// The current repository's board when there is one, like the board opens it.
+function defaultBoard() {
+  try {
+    const root = execFileSync("git", ["rev-parse", "--show-toplevel"], { stdio: ["ignore", "pipe", "ignore"] }).toString().trim();
+    const name = basename(root);
+    if (existsSync(join(DIR, `${name}.md`))) return name;
+  } catch {
+    // not in a repository
+  }
+  return "main";
+}
+
+function columnOf(name) {
+  const col = COLUMNS.findIndex((c) => c.toLowerCase() === String(name ?? "").toLowerCase());
+  if (col < 0) fail(`unknown column "${name}"; one of: ${COLUMNS.map((c) => c.toLowerCase()).join(", ")}`);
+  return col;
+}
+
+// Cards are numbered down the columns in order, as `show` prints them.
+function numbered(lanes) {
+  return lanes.flatMap((lane, col) => lane.map((text, row) => ({ col, row, text })));
+}
+
+function findCard(lanes, query) {
+  const cards = numbered(lanes);
+  if (/^\d+$/.test(query ?? "")) {
+    const card = cards[Number(query) - 1];
+    return card ?? fail(`no card ${query}; the board has ${cards.length}`);
+  }
+  const q = String(query ?? "").toLowerCase();
+  const matches = cards.filter((c) => c.text.toLowerCase() === q);
+  const partial = matches.length ? matches : cards.filter((c) => c.text.toLowerCase().includes(q));
+  if (!q || !partial.length) fail(`no card matches "${query}"`);
+  if (partial.length > 1) fail(`"${query}" matches ${partial.length} cards; use its number:\n${partial.map((c) => `  ${cards.indexOf(c) + 1}. ${c.text}`).join("\n")}`);
+  return partial[0];
+}
+
+function show(board, lanes) {
+  const lines = [`# ${board}`];
+  let n = 0;
+  lanes.forEach((lane, col) => {
+    lines.push("", `${COLUMNS[col]} (${lane.length})`);
+    for (const text of lane) lines.push(`  ${++n}. ${text}`);
+  });
+  return lines.join("\n");
+}
+
+// Writes through a temporary file, so the board never reads half a file.
+function save(path, board, lanes) {
+  mkdirSync(DIR, { recursive: true });
+  const tmp = `${path}.tmp-${process.pid}`;
+  writeFileSync(tmp, serialize(board, lanes));
+  renameSync(tmp, path);
+}
+
+export function main(argv) {
+  const args = [...argv];
+  let board = null;
+  const flag = args.findIndex((a) => a === "-b" || a === "--board");
+  if (flag >= 0) [, board] = args.splice(flag, 2);
+  const [command = "show", ...rest] = args;
+  if (command === "help" || command === "-h" || command === "--help") return USAGE;
+  if (command === "boards") {
+    return existsSync(DIR) ? readdirSync(DIR).filter((f) => f.endsWith(".md")).map((f) => f.slice(0, -3)).sort().join("\n") : "";
+  }
+
+  board ??= defaultBoard();
+  const path = join(DIR, `${board}.md`);
+  const lanes = parse(existsSync(path) ? readFileSync(path, "utf8") : "");
+  const change = (result, message) => {
+    if (!result) fail("nothing changed");
+    save(path, board, result.lanes);
+    return message;
+  };
+
+  switch (command) {
+    case "show":
+      return show(board, lanes);
+    case "add": {
+      const [column, ...words] = rest;
+      const col = columnOf(column);
+      const text = words.join(" ");
+      return change(addCard(lanes, col, text), `added to ${COLUMNS[col].toLowerCase()}: ${text}`);
+    }
+    case "move":
+    case "done": {
+      const card = findCard(lanes, rest[0]);
+      const to = command === "done" ? COLUMNS.length - 1 : columnOf(rest[1]);
+      if (to === card.col) return `already in ${COLUMNS[to].toLowerCase()}: ${card.text}`;
+      const next = lanes.map((lane, i) => (i === card.col ? lane.filter((_, r) => r !== card.row) : i === to ? [...lane, card.text] : lane));
+      return change({ lanes: next }, `moved to ${COLUMNS[to].toLowerCase()}: ${card.text}`);
+    }
+    case "edit": {
+      const card = findCard(lanes, rest[0]);
+      const text = rest.slice(1).join(" ");
+      if (!text.trim()) fail("give the new text; `kanban rm` deletes a card");
+      return change(editCard(lanes, card.col, card.row, text), `edited: ${text}`);
+    }
+    case "link": {
+      const card = findCard(lanes, rest[0]);
+      const token = rest[1] ?? "";
+      if (!/^(#\d+|@[\w./-]+)$/.test(token)) fail(`link to "#<number>" or "@<branch>", not "${token}"`);
+      const old = cardLink(card.text)?.token;
+      const text = old ? card.text.replace(old, token) : `${withoutLink(card.text)} ${token}`;
+      return change(editCard(lanes, card.col, card.row, text), `linked: ${text}`);
+    }
+    case "rm": {
+      const card = findCard(lanes, rest[0]);
+      return change(removeCard(lanes, card.col, card.row), `deleted: ${card.text}`);
+    }
+    default:
+      fail(`unknown command "${command}"\n\n${USAGE}`);
+  }
+}
+
+if (import.meta.url === `file://${process.argv[1]}` || process.argv[1]?.endsWith("/kanban")) {
+  try {
+    const out = main(process.argv.slice(2));
+    if (out) console.log(out);
+  } catch (e) {
+    console.error(e instanceof UsageError ? `kanban: ${e.message}` : e);
+    process.exit(1);
+  }
+}
