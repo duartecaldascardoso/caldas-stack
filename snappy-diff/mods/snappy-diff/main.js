@@ -1,7 +1,7 @@
 // snappy diff for Herdr: review a branch like a pull request, without leaving the window.
 import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input, Scrollbar, Popup, v_virtual_list, VirtualListScrollHandle } from "gpui-base";
-import { props, closeOverlay, focused, notify, settings, theme } from "herdr";
+import { props, closeOverlay, focused, notify, agents, panes, hc, settings, theme } from "herdr";
 import * as git from "./git.js";
 import { parsePatch, skippedFiles, firstChange } from "./patch.js";
 import { languageOf } from "./syntax.js";
@@ -114,6 +114,7 @@ export default class SnappyDiff extends View {
     }
     const [base, branch, dirty, refs] = await Promise.all([git.defaultBase(repo), git.currentBranch(repo), git.isDirty(repo), git.refs(repo)]);
     this.refs = refs;
+    this.branch = branch;
     if (given.pr) return this.openPullRequest(repo, given.pr, cx);
     // With uncommitted work, show it on top of the branch; otherwise the branch, like a PR.
     const head = given.head ?? (dirty || base === git.EMPTY_TREE ? "" : branch);
@@ -162,16 +163,19 @@ export default class SnappyDiff extends View {
       const [{ text, skipped }, commits] = await Promise.all([git.diff(source), git.commits(source.repo, source.base, source.head)]);
       if (rev !== this.rev) return;
       const key = reviewKey(source);
+      const sameReview = key === this.reviewKey && this.files.length > 0;
       if (key !== this.reviewKey) {
         this.review = await readReview(key);
         this.reviewKey = key;
         this.open = new Map();
         this.scroll.scroll_to_item(0, "top");
       }
+      const before = this.openCommentIds();
       this.text = text;
       this.files = [...parsePatch(text, rev), ...skippedFiles(skipped, rev)];
       this.commits = commits;
       this.ms = Date.now() - started;
+      if (sameReview) this.noticeAddressed(before);
     } catch (e) {
       if (rev !== this.rev) return;
       this.files = [];
@@ -190,9 +194,11 @@ export default class SnappyDiff extends View {
       try {
         const { text, skipped } = await git.diff(source);
         if (source !== this.source || text === this.text) return;
+        const before = this.openCommentIds();
         this.text = text;
         const rev = ++this.rev;
         this.files = [...parsePatch(text, rev, this.files), ...skippedFiles(skipped, rev)];
+        this.noticeAddressed(before);
         this.rebuild();
         cx.notify();
       } catch {
@@ -428,11 +434,56 @@ export default class SnappyDiff extends View {
     return s.head ? `the changes in \`${s.base}...${s.head}\`` : `my uncommitted changes (against \`${s.base}\`)`;
   }
 
-  copyForAI(cx) {
+  openCommentIds() {
+    return new Set(withStatus(this.review.comments, this.files).filter((c) => !c.outdated).map((c) => c.id));
+  }
+
+  // When a refresh shows commented code changed (an agent at work, say), say so.
+  noticeAddressed(before) {
+    const now = this.openCommentIds();
+    const addressed = [...before].filter((id) => !now.has(id)).length;
+    if (!addressed) return;
+    notify({ title: `${plural(addressed, "comment")} addressed`, body: "The code they were on has changed.", level: "success", timeout: 4000 });
+  }
+
+  // The agents that could take this review: those whose terminal is on the branch under
+  // review, then any others inside the repository, most recently active first.
+  reviewAgents() {
+    const s = this.source;
+    if (!s) return [];
+    const branch = this.pr?.headRefName ?? (s.head ? s.head.replace(/^origin\//, "") : this.branch);
+    const byPane = new Map(panes().map((p) => [p.pane, p]));
+    return agents()
+      .map((agent) => ({ agent, pane: byPane.get(agent.pane) }))
+      .filter(({ pane }) => pane?.cwd && (pane.cwd === s.repo || pane.cwd.startsWith(`${s.repo}/`) || (branch && pane.branch === branch)))
+      .sort((a, b) => (b.pane.branch === branch) - (a.pane.branch === branch) || b.agent.seq - a.agent.seq);
+  }
+
+  sendToAgent(cx, chosen) {
+    const open = this.comments.filter((c) => !c.outdated);
+    if (!open.length) return;
+    const candidates = this.reviewAgents();
+    if (!chosen && candidates.length > 1) return this.openMenu("agent", cx);
+    const target = chosen ?? candidates[0];
+    if (!target) {
+      notify({ title: "No agent in this repository", body: "Start one here, or copy the review instead.", level: "warning" });
+      return;
+    }
+    this.menu = null;
+    this.handle.focus();
+    const name = target.agent.tab_name || target.agent.title || target.agent.address;
+    cx.spawn(async () => {
+      const result = await hc(["send", target.agent.address, reviewPrompt(this.subject(), open, this.files)]);
+      if (result.code === 0) notify({ title: `Sent ${plural(open.length, "comment")} to ${name}`, body: "You'll hear when the code they're on changes.", level: "success", timeout: 3000 });
+      else notify({ title: `Couldn't send to ${name}`, body: (result.stderr || result.stdout).trim().split("\n").pop(), level: "error" });
+    });
+  }
+
+  copyReview(cx) {
     const open = this.comments.filter((c) => !c.outdated);
     if (!open.length) return;
     cx.write_to_clipboard(reviewPrompt(this.subject(), open, this.files));
-    notify({ title: "Copied for your agent", body: `${plural(open.length, "comment")}, ready to paste`, level: "success", timeout: 2500 });
+    notify({ title: "Review copied", body: `${plural(open.length, "comment")} as a prompt, ready to paste`, level: "success", timeout: 2500 });
   }
 
   openInEditor(file, cx) {
@@ -499,6 +550,13 @@ export default class SnappyDiff extends View {
     if (this.menu === "head") {
       return [{ label: "Working tree", current: !s.head, pick: (cx) => this.reload({ head: "", commit: null }, cx) },
         ...refs.map((r) => ({ label: r, current: r === s.head, pick: (cx) => this.reload({ head: r, commit: null }, cx) }))].filter(match);
+    }
+    if (this.menu === "agent") {
+      return this.reviewAgents().map((candidate) => ({
+        label: candidate.agent.tab_name || candidate.agent.title,
+        hint: [candidate.agent.app, candidate.pane.branch, candidate.agent.status].filter(Boolean).join(" · "),
+        pick: (cx) => this.sendToAgent(cx, candidate),
+      })).filter(match);
     }
     if (this.menu === "commit") {
       return [{ label: `All ${this.commits.length} commits`, current: !s.commit, pick: (cx) => this.reload({ commit: null }, cx) },
@@ -567,7 +625,8 @@ export default class SnappyDiff extends View {
       ["Review next unviewed file", "n", (cx) => this.reviewNext(cx)],
       ["Mark file viewed", "v", (cx) => { const f = this.activeFile(); if (f) this.toggleViewed(f, cx, true); }],
       ["Open file in " + EDITORS[this.prefs.editor], "o", (cx) => this.openInEditor(this.activeFile(), cx)],
-      ["Copy comments for AI", "", (cx) => this.copyForAI(cx)],
+      ["Send comments to the agent", "", (cx) => this.sendToAgent(cx)],
+      ["Copy comments as a prompt", "", (cx) => this.copyReview(cx)],
       ["Toggle sidebar", "⌘B", (cx) => this.setPref("sidebar", !this.prefs.sidebar, cx)],
       [this.prefs.diffStyle === "split" ? "Unified view" : "Split view", "", (cx) => this.setPref("diffStyle", this.prefs.diffStyle === "split" ? "unified" : "split", cx)],
       ["Collapse or expand all files", "", (cx) => this.toggleAll(cx)],
@@ -702,9 +761,13 @@ export default class SnappyDiff extends View {
         .child(h_flex().gap(4).child(div().text_color(t.ansi2).child(`+${add.toLocaleString()}`)).child(div().text_color(t.ansi1).child(`−${del.toLocaleString()}`)))
         .when(this.ms != null, (el) => el.child(`${this.ms} ms`))))
       .when(openComments > 0, (el) => el
-        .child(h_flex().id("copy-ai").h(28).px(10).gap(6).items_center().rounded_l(6).border_1().border_color(t.border).cursor_pointer()
-          .text_size(12).hover((st) => st.bg(t.hover)).on_click((_e, cx) => this.copyForAI(cx))
-          .child(icon("sparkles", 13)).child(`Copy for AI (${openComments})`))
+        .child(Popup.new("menu-agent", h_flex().id("send-agent").h(28).px(10).gap(6).items_center().rounded_l(6).border_1().border_color(t.border)
+          .cursor_pointer().text_size(12).hover((st) => st.bg(t.hover)).on_click((_e, cx) => this.sendToAgent(cx))
+          .child(icon("send", 13)).child(`Send to agent (${openComments})`)).anchor("bottom_right")
+          .when(this.menu === "agent", (el) => el.content(this.renderMenu(t))))
+        .child(h_flex().id("copy-review").h(28).w(28).justify_center().items_center().border_1().border_l_0().border_color(t.border)
+          .cursor_pointer().text_color(t.muted).hover((st) => st.bg(t.hover)).on_click((_e, cx) => this.copyReview(cx))
+          .child(icon("copy", 12)))
         .child(h_flex().id("clear-comments").h(28).w(28).justify_center().items_center().rounded_r(6).border_1().border_l_0().border_color(t.border)
           .cursor_pointer().text_color(t.muted).hover((st) => st.bg(t.hover)).on_click((_e, cx) => this.setReview({ ...this.review, comments: [] }) || (this.rebuild(), cx.notify()))
           .child(icon("x", 12))))
