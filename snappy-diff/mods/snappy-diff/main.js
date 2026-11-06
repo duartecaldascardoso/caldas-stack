@@ -1,6 +1,6 @@
 // snappy diff for Herdr: review a branch like a pull request, without leaving the window.
 import { View, div, svg } from "gpui-kit";
-import { v_flex, h_flex, InputState, Input, Scrollbar, Popup, v_virtual_list, VirtualListScrollHandle } from "gpui-base";
+import { v_flex, h_flex, InputState, Input, Scrollbar, v_virtual_list, VirtualListScrollHandle } from "gpui-base";
 import { props, closeOverlay, focused, notify, agents, panes, hc, settings, theme } from "herdr";
 import * as git from "./git.js";
 import { parsePatch, skippedFiles, firstChange } from "./patch.js";
@@ -20,6 +20,8 @@ const TREE_ROW_H = 28;
 const SIDEBAR_W = 288;
 const SCROLLBAR_W = 12;
 const COMMENT_LINE_H = 18;
+const TOOLBAR_H = 48;
+const MENU_LIST_H = 320;
 const EDITOR_H = 96;
 const REFRESH_MS = 2000; // uncommitted changes move under our feet
 // Fixed-width parts of a file header, from the right edge, so a click can tell them apart.
@@ -532,8 +534,16 @@ export default class SnappyDiff extends View {
 
   // Pickers: base, head, commit and settings
 
+  // Menus drop below the button that opened them: its window bounds come from the press, the
+  // view's own from the same press reaching the root.
   openMenu(name, cx) {
     this.menu = this.menu === name ? null : name;
+    const button = this.pressed;
+    const view = this.viewBounds;
+    this.menuAt = button && view
+      ? (name === "settings" || name === "agent" ? { right: view.x + view.width - (button.x + button.width) } : { left: button.x - view.x })
+      : { right: 10 };
+    this.pressed = null;
     this.menuIndex = 0;
     this.menuInput.set_value("");
     if (this.menu && name !== "settings") this.menuInput.focus();
@@ -704,6 +714,8 @@ export default class SnappyDiff extends View {
       .child(h_flex().flex_1().min_h(0)
         .when(this.prefs.sidebar, (el) => el.child(this.renderSidebar(t, active)))
         .child(this.renderMain(t, code, active)))
+      .on_mouse_down("left", (e) => { if (e.bounds) this.viewBounds = e.bounds; })
+      .when(Boolean(this.menu) && Boolean(this.source), (el) => el.child(this.renderMenu(t)))
       .when(Boolean(this.palette), (el) => el.child(this.renderPalette(t)))
       // Measures the code font's character width, which wrapping is computed from.
       .child(div().id("probe").absolute().top(-100).left(0).opacity(0).whitespace_nowrap().text_size(CODE_SIZE)
@@ -715,9 +727,15 @@ export default class SnappyDiff extends View {
         .child("0".repeat(100)));
   }
 
-  button(id, content, onClick, { active = false, title } = {}) {
+  // Remembers where a menu's button is, for the menu to drop below it.
+  pressAt(event) {
+    if (event.bounds) this.pressed = event.bounds;
+  }
+
+  button(id, content, onClick, { active = false } = {}) {
     const t = theme();
     return h_flex().id(id).h(28).px(8).gap(6).items_center().rounded(6).cursor_pointer().flex_none()
+      .on_mouse_down("left", (e) => this.pressAt(e))
       .text_color(active ? t.foreground : t.muted).when(active, (el) => el.bg(t.raised))
       .hover((s) => s.bg(t.hover).text_color(t.foreground))
       .on_click((_e, cx) => onClick(cx))
@@ -734,13 +752,13 @@ export default class SnappyDiff extends View {
     const picker = (name, label, mono = true) => {
       const trigger = h_flex().id(`pick-${name}`).h(28).px(10).gap(8).items_center().rounded(6).border_1().border_color(t.border)
         .cursor_pointer().hover((st) => st.bg(t.hover)).flex_none()
+        .on_mouse_down("left", (e) => this.pressAt(e))
         .on_click((_e, cx) => this.openMenu(name, cx))
         .child(div().max_w(220).truncate().text_size(12.5).when(mono, (el) => el.font_family(settings().font_family)).child(label))
         .child(div().text_color(t.dim).child(icon("chevron-down", 12)));
-      return Popup.new(`menu-${name}`, trigger).anchor("bottom_left")
-        .when(this.menu === name, (el) => el.content(this.renderMenu(t)));
+      return trigger;
     };
-    return h_flex().id("toolbar").h(48).flex_none().px(10).gap(6).items_center().border_b_1().border_color(t.border).bg(t.background)
+    return h_flex().id("toolbar").h(TOOLBAR_H).flex_none().px(10).gap(6).items_center().border_b_1().border_color(t.border).bg(t.background)
       .child(this.button("sidebar", icon("panel"), (cx) => this.setPref("sidebar", !this.prefs.sidebar, cx)))
       .child(div().mr(4).text_size(14).font_semibold().whitespace_nowrap().child("snappy diff"))
       .when(Boolean(s), (el) => el
@@ -761,10 +779,10 @@ export default class SnappyDiff extends View {
         .child(h_flex().gap(4).child(div().text_color(t.ansi2).child(`+${add.toLocaleString()}`)).child(div().text_color(t.ansi1).child(`−${del.toLocaleString()}`)))
         .when(this.ms != null, (el) => el.child(`${this.ms} ms`))))
       .when(openComments > 0, (el) => el
-        .child(Popup.new("menu-agent", h_flex().id("send-agent").h(28).px(10).gap(6).items_center().rounded_l(6).border_1().border_color(t.border)
-          .cursor_pointer().text_size(12).hover((st) => st.bg(t.hover)).on_click((_e, cx) => this.sendToAgent(cx))
-          .child(icon("send", 13)).child(`Send to agent (${openComments})`)).anchor("bottom_right")
-          .when(this.menu === "agent", (el) => el.content(this.renderMenu(t))))
+        .child(h_flex().id("send-agent").h(28).px(10).gap(6).items_center().rounded_l(6).border_1().border_color(t.border)
+          .cursor_pointer().text_size(12).hover((st) => st.bg(t.hover))
+          .on_mouse_down("left", (e) => this.pressAt(e)).on_click((_e, cx) => this.sendToAgent(cx))
+          .child(icon("send", 13)).child(`Send to agent (${openComments})`))
         .child(h_flex().id("copy-review").h(28).w(28).justify_center().items_center().border_1().border_l_0().border_color(t.border)
           .cursor_pointer().text_color(t.muted).hover((st) => st.bg(t.hover)).on_click((_e, cx) => this.copyReview(cx))
           .child(icon("copy", 12)))
@@ -773,17 +791,20 @@ export default class SnappyDiff extends View {
           .child(icon("x", 12))))
       .child(this.button("collapse", icon(files.length && files.every((f) => this.isCollapsed(f)) ? "expand" : "collapse"), (cx) => this.toggleAll(cx)))
       .child(this.button("style", icon(this.prefs.diffStyle === "split" ? "split" : "unified"), (cx) => this.setPref("diffStyle", this.prefs.diffStyle === "split" ? "unified" : "split", cx)))
-      .child(Popup.new("menu-settings", this.button("settings", icon("settings"), (cx) => this.openMenu("settings", cx), { active: this.menu === "settings" })).anchor("bottom_right")
-        .when(this.menu === "settings", (el) => el.content(this.renderMenu(t))));
+      .child(this.button("settings", icon("settings"), (cx) => this.openMenu("settings", cx), { active: this.menu === "settings" }));
   }
 
   renderMenu(t) {
     const options = this.menuOptions().slice(0, 200);
     const searchable = this.menu !== "settings";
-    return v_flex().id("menu").w(this.menu === "commit" ? 420 : 300).max_h(380).mt(4).p(4).gap(2).rounded(8).border_1().border_color(t.border).bg(t.popover).shadow_lg()
-      .on_mouse_down_out((_e, cx) => { this.menu = null; this.handle.focus(); cx.notify(); })
+    const at = this.menuAt ?? { right: 10 };
+    const panel = v_flex().id("menu").absolute().top(TOOLBAR_H + 2).w(this.menu === "commit" ? 420 : 300).p(4).gap(2)
+      .rounded(8).border_1().border_color(t.border).bg(t.popover).shadow_lg()
+      .when(at.left != null, (el) => el.left(at.left)).when(at.right != null, (el) => el.right(at.right))
+      .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
       .when(searchable, (el) => el.child(div().p(4).child(Input.new(this.menuInput).h(30).px(8).rounded(6).border_1().border_color(t.input).bg(t.background).text_size(12.5))))
-      .child(v_flex().id("menu-options").min_h(0).overflow_y_scrollbar().gap(1).children(options.map((o, i) =>
+      .when(!options.length, (el) => el.child(div().px(10).py(8).text_size(12).text_color(t.dim).child("Nothing matches.")))
+      .child(v_flex().id("menu-options").max_h(MENU_LIST_H).overflow_y_scrollbar().gap(1).children(options.map((o, i) =>
         h_flex().id(`option-${i}`).min_h(28).px(8).py(4).gap(8).items_center().rounded(5).cursor_pointer()
           .when(i === this.menuIndex, (el) => el.bg(t.hover)).hover((s) => s.bg(t.hover))
           .on_click((_e, cx) => o.pick(cx))
@@ -791,6 +812,10 @@ export default class SnappyDiff extends View {
           .child(v_flex().min_w(0).flex_1()
             .child(div().truncate().text_size(12.5).when(searchable && this.menu !== "commit", (el) => el.font_family(settings().font_family)).child(o.label))
             .when(Boolean(o.hint), (el) => el.child(div().truncate().text_size(11).text_color(t.dim).child(o.hint)))))));
+    // A clear backdrop over the rest of the view: a press there closes the menu.
+    return div().absolute().inset_0()
+      .on_mouse_down("left", (_e, cx) => { this.menu = null; this.handle.focus(); cx.notify(); })
+      .child(panel);
   }
 
   renderSidebar(t, active) {
@@ -1013,7 +1038,7 @@ export default class SnappyDiff extends View {
           .child(div().text_color(t.dim).child(icon("search", 15)))
           .child(div().flex_1().child(Input.new(this.paletteInput).w_full().text_size(14)))
           .child(div().text_size(11).text_color(t.dim).child(placeholder)))
-        .child(v_flex().id("palette-results").min_h(0).overflow_y_scrollbar().p(6).gap(1)
+        .child(v_flex().id("palette-results").max_h(400).overflow_y_scrollbar().p(6).gap(1)
           .when(!results.length, (el) => el.child(div().p(12).text_size(12.5).text_color(t.dim)
             .child(this.palette === "lines" ? "Type at least two characters." : "Nothing matches.")))
           .children(results.slice(0, 120).map((r, i) => h_flex().id(`result-${i}`).h(32).px(10).gap(10).items_center().rounded(6).cursor_pointer()
