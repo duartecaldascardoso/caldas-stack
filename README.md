@@ -62,7 +62,7 @@ A native port of [snappy-diff](https://github.com/duartecaldascardoso/snappy-dif
 | `⌘B` | Toggle the sidebar |
 | `?` | Settings: split or unified, whitespace, editor |
 
-Code that was only moved is faded, and its file header says how many lines moved. **Send to agent** types your comments, with files, lines and code, into the agent working on that branch; when the code they were on changes, it tells you they were addressed. The copy button puts the same prompt on the clipboard. Viewed files and comments are kept per branch. Pull requests are fetched with the GitHub CLI (`gh`).
+When commits land on a branch you've reviewed, **N new commits since your review** shows only those. Code that was only moved is faded, and its file header says how many lines moved. **Send to agent** types your comments, with files, lines and code, into the agent working on that branch; when the code they were on changes, it tells you they were addressed. The copy button puts the same prompt on the clipboard. Viewed files and comments are kept per branch. Pull requests are fetched with the GitHub CLI (`gh`).
 
 ## herdr
 

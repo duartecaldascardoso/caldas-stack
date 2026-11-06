@@ -245,3 +245,15 @@ test("fileRows opens a separator into the lines it hid", () => {
   const opened = rows.filter((r) => r.t === "split" && r.right?.text.startsWith("line "));
   assert.deepEqual(opened.map((r) => [r.left.n, r.right.n]), [[5, 6], [6, 7], [7, 8], [8, 9], [9, 10]]);
 });
+
+test("sinceReview counts the commits on top of the tip you last reviewed", async () => {
+  const { sinceReview, rangeKey } = await import("../mods/snappy-diff/review.js");
+  const commits = [{ sha: "c3" }, { sha: "c2" }, { sha: "c1" }]; // newest first
+  assert.deepEqual(sinceReview("c1", commits), { sha: "c1", count: 2 });
+  assert.equal(sinceReview("c3", commits), null); // nothing new
+  assert.equal(sinceReview("gone", commits), null);
+  assert.equal(sinceReview(null, commits), null);
+  assert.equal(rangeKey({ repo: "/r", base: "main", head: "" }), null); // the working tree has no tip
+  assert.equal(rangeKey({ repo: "/r", base: "main", head: "feat", commit: "c2" }), null);
+  assert.equal(rangeKey({ repo: "/r", base: "main", head: "feat" }), "/r:main...feat");
+});

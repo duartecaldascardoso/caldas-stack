@@ -73,16 +73,18 @@ export async function commits(repo, base, head) {
 // The patch for a source: one commit, base...head like a pull request, or, with no head,
 // the working tree against where it forked from base, untracked files included.
 // Returns { text, skipped }: skipped files are too large to diff, with their line counts.
-export async function diff({ repo, base, head, commit, ignoreWhitespace }) {
+export async function diff({ repo, base, head, commit, since, ignoreWhitespace }) {
   const whitespace = ignoreWhitespace ? ["-w"] : [];
   let command;
   if (commit) {
     if (isOption(commit)) throw new Error("invalid commit");
     command = ["show", "--format=", "--diff-merges=first-parent", ...whitespace, commit];
   } else {
-    if (isOption(base) || isOption(head)) throw new Error("invalid ref");
-    // The empty tree has no history to fork from: compare against it directly.
-    const range = head ? [`${base}...${head}`] : base === EMPTY_TREE ? [base] : ["--merge-base", base];
+    if (isOption(base) || isOption(head) || isOption(since)) throw new Error("invalid ref");
+    // The empty tree has no history to fork from: compare against it directly. "Since your
+    // review" diffs from the commit you last reviewed instead of the base.
+    const from = since || base;
+    const range = head ? [`${from}...${head}`] : base === EMPTY_TREE ? [base] : ["--merge-base", base];
     command = ["diff", ...whitespace, ...range];
   }
   const stats = await git(repo, [...command, "--numstat", "-z", "-M", "--"]);

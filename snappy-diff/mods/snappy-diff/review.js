@@ -7,6 +7,16 @@ export function reviewKey(source) {
 
 export const emptyReview = () => ({ viewed: {}, comments: [] });
 
+// The range whose head you review commit by commit: a branch, not the working tree or one commit.
+export const rangeKey = (source) => (source.head && !source.commit ? `${source.repo}:${source.base}...${source.head}` : null);
+
+// New commits on top of the tip you last reviewed: commits are newest first, so the reviewed
+// tip's position is how many are new. Null when there are none, or it isn't in the range.
+export function sinceReview(lastSha, commits) {
+  const newer = lastSha ? commits.findIndex((c) => c.sha === lastSha) : -1;
+  return newer > 0 ? { sha: lastSha, count: newer } : null;
+}
+
 // Viewed holds the signature a file had when marked, so it unmarks itself once the file changes.
 export const isViewed = (review, file) => review.viewed[file.id] === file.signature;
 export const changedSinceViewed = (review, file) => file.id in review.viewed && review.viewed[file.id] !== file.signature;

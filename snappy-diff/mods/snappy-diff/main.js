@@ -8,8 +8,8 @@ import { languageOf } from "./syntax.js";
 import { fileRows, wrapCount, wrapLines, segments } from "./rows.js";
 import { treeRows, fileMatches, breakdown } from "./tree.js";
 import { findMoves, isMoved } from "./moved.js";
-import { reviewKey, emptyReview, isViewed, changedSinceViewed, toggleViewed, linesText, withStatus, reviewPrompt } from "./review.js";
-import { DEFAULT_PREFS, readPrefs, writePrefs, readReview, writeReview } from "./store.js";
+import { reviewKey, rangeKey, sinceReview, emptyReview, isViewed, changedSinceViewed, toggleViewed, linesText, withStatus, reviewPrompt } from "./review.js";
+import { DEFAULT_PREFS, readPrefs, writePrefs, readReview, writeReview, readLastReviewed, writeLastReviewed } from "./store.js";
 
 const ICONS = "mods/snappy-diff/icons";
 const CODE_SIZE = 12.5;
@@ -81,6 +81,7 @@ export default class SnappyDiff extends View {
     this.paletteIndex = 0;
     this.editing = null; // the comment being written: { id, file, side, start, end }
     this.pr = null; // the pull request under review, with the head ref it was fetched to
+    this.lastReviewed = {}; // range -> the head commit last reviewed there
 
     this.handle = cx.focus_handle();
     this.scroll = VirtualListScrollHandle.new();
@@ -112,7 +113,7 @@ export default class SnappyDiff extends View {
   // Loading
 
   async start(cx) {
-    this.prefs = await readPrefs();
+    [this.prefs, this.lastReviewed] = await Promise.all([readPrefs(), readLastReviewed()]);
     // Whoever opened it can name what to show: { repo, base, head } or { repo, pr }. Otherwise
     // the focused terminal's repository.
     const given = props() ?? {};
@@ -174,7 +175,7 @@ export default class SnappyDiff extends View {
       const [{ text, skipped }, commits] = await Promise.all([git.diff(source), git.commits(source.repo, source.base, source.head)]);
       if (rev !== this.rev) return;
       const key = reviewKey(source);
-      const sameReview = key === this.reviewKey && this.files.length > 0;
+      const sameReview = key === this.reviewKey && this.files.length > 0 && source.since === this.shownSince;
       if (key !== this.reviewKey) {
         this.review = await readReview(key);
         this.reviewKey = key;
@@ -185,6 +186,7 @@ export default class SnappyDiff extends View {
       this.text = text;
       this.files = [...parsePatch(text, rev), ...skippedFiles(skipped, rev)];
       this.moves = findMoves(this.files);
+      this.shownSince = source.since ?? null;
       if (key !== this.reviewKey || !this.files.some((f) => f.id === this.only)) this.only = null;
       this.commits = commits;
       this.ms = Date.now() - started;
@@ -227,7 +229,8 @@ export default class SnappyDiff extends View {
   reload(change, cx) {
     this.menu = null;
     this.handle.focus();
-    cx.spawn((cx) => this.load({ ...this.source, ...change }, cx));
+    const moved = ["base", "head", "commit"].some((k) => k in change);
+    cx.spawn((cx) => this.load({ ...this.source, ...(moved ? { since: null } : {}), ...change }, cx));
   }
 
   setPref(key, value, cx) {
@@ -417,6 +420,22 @@ export default class SnappyDiff extends View {
   setReview(review) {
     this.review = review;
     writeReview(this.reviewKey, review);
+    this.markReviewed();
+  }
+
+  // Reviewing anything (a viewed mark, a comment) remembers the branch tip you reviewed, so
+  // commits pushed on top later can be reviewed on their own.
+  markReviewed() {
+    const key = this.source && rangeKey(this.source);
+    const tip = this.commits[0]?.sha;
+    if (!key || !tip || this.lastReviewed[key] === tip) return;
+    this.lastReviewed = { ...this.lastReviewed, [key]: tip };
+    writeLastReviewed(this.lastReviewed);
+  }
+
+  sinceReview() {
+    const key = this.source && rangeKey(this.source);
+    return key ? sinceReview(this.lastReviewed[key], this.commits) : null;
   }
 
   toggleViewed(file, cx, advance = false) {
@@ -850,6 +869,17 @@ export default class SnappyDiff extends View {
         .when(this.commits.length > 1, (el) => el.child(picker("commit", s.commit ? `${s.commit.slice(0, 7)} ${this.commits.find((c) => c.sha === s.commit)?.subject ?? ""}` : `All ${this.commits.length} commits`, false)))
         .child(this.button("reload", icon("reload"), (cx) => this.reload({}, cx)))
         .child(this.button("whitespace", icon("pilcrow"), (cx) => this.reload({ ignoreWhitespace: !s.ignoreWhitespace }, cx), { active: s.ignoreWhitespace }))
+        .when(Boolean(s.since), (el) => el.child(h_flex().id("since").h(28).px(10).gap(6).items_center().rounded(6).cursor_pointer()
+          .bg(alpha(t.accent, "26")).text_size(12).text_color(t.foreground).hover((st) => st.bg(alpha(t.accent, "38")))
+          .on_click((_e, cx) => this.reload({ since: null }, cx))
+          .child(icon("history", 12)).child("Since your review").child(div().text_color(t.muted).child(icon("x", 11)))))
+        .when(!s.since && Boolean(this.sinceReview()), (el) => {
+          const since = this.sinceReview();
+          return el.child(h_flex().id("since").h(28).px(10).gap(6).items_center().rounded(6).border_1().border_color(t.accent).cursor_pointer()
+            .text_size(12).text_color(t.foreground).hover((st) => st.bg(t.hover))
+            .on_click((_e, cx) => this.reload({ since: since.sha }, cx))
+            .child(icon("history", 12)).child(`${plural(since.count, "new commit")} since your review`));
+        })
         .when(Boolean(this.pr) && this.pr.head === s.head && !s.commit, (el) => el.child(h_flex().id("pr").h(28).px(8).gap(6).items_center().rounded(6).cursor_pointer()
           .min_w(0).text_size(12).text_color(t.muted).hover((st) => st.bg(t.hover))
           .on_click((_e, cx) => cx.open_url(this.pr.url))

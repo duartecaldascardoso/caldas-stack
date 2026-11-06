@@ -7,6 +7,7 @@ import { emptyReview } from "./review.js";
 
 const DIR = `${appHome()}/data/snappy-diff`;
 const PREFS = `${DIR}/prefs.json`;
+const LAST_REVIEWED = `${DIR}/last-reviewed.json`; // "repo:base...head" -> the head commit you last reviewed
 
 export const DEFAULT_PREFS = { diffStyle: "split", sidebar: true, editor: "zed" };
 
@@ -25,3 +26,6 @@ export const readPrefs = () => readJson(PREFS, DEFAULT_PREFS);
 export const writePrefs = (prefs) => writeJson(PREFS, prefs).catch(() => {});
 export const readReview = (key) => readJson(reviewPath(key), emptyReview());
 export const writeReview = (key, review) => writeJson(reviewPath(key), review).catch(() => {});
+
+export const readLastReviewed = () => readJson(LAST_REVIEWED, {});
+export const writeLastReviewed = (all) => writeJson(LAST_REVIEWED, all).catch(() => {});
