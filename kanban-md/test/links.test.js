@@ -4,11 +4,12 @@ import { prStatus, columnFor, describe, numberFromUrl } from "../mods/kanban-md/
 
 test("prStatus reads state, checks and review from gh", () => {
   assert.deepEqual(prStatus({ state: "OPEN", isDraft: false, reviewDecision: "APPROVED", statusCheckRollup: [{ conclusion: "SUCCESS" }, { state: "SUCCESS" }] }),
-    { state: "open", checks: "passing", review: "approved" });
+    { state: "open", checks: "passing", review: "approved", branch: null });
   assert.deepEqual(prStatus({ state: "OPEN", isDraft: true, reviewDecision: "", statusCheckRollup: [{ status: "IN_PROGRESS", conclusion: "" }] }),
-    { state: "draft", checks: "pending", review: null });
+    { state: "draft", checks: "pending", review: null, branch: null });
   assert.deepEqual(prStatus({ state: "MERGED", statusCheckRollup: [{ conclusion: "SUCCESS" }, { conclusion: "FAILURE" }], reviewDecision: "CHANGES_REQUESTED" }),
-    { state: "merged", checks: "failing", review: "changes" });
+    { state: "merged", checks: "failing", review: "changes", branch: null });
+  assert.equal(prStatus({ state: "OPEN", headRefName: "feature/x" }).branch, "feature/x");
   assert.equal(prStatus({ state: "CLOSED", statusCheckRollup: [] }).checks, null);
 });
 

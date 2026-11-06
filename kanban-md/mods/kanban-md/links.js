@@ -3,9 +3,9 @@
 const FAILED = new Set(["FAILURE", "ERROR", "CANCELLED", "TIMED_OUT", "ACTION_REQUIRED", "STARTUP_FAILURE"]);
 const PASSED = new Set(["SUCCESS", "NEUTRAL", "SKIPPED"]);
 
-// From `gh pr view --json state,isDraft,reviewDecision,statusCheckRollup`:
+// From `gh pr view --json state,isDraft,reviewDecision,statusCheckRollup,headRefName`:
 // { state: "open" | "draft" | "merged" | "closed", checks: "passing" | "failing" | "pending" | null,
-//   review: "approved" | "changes" | null }.
+//   review: "approved" | "changes" | null, branch: its head branch or null }.
 export function prStatus(pr) {
   const state = pr.state === "MERGED" ? "merged" : pr.state === "CLOSED" ? "closed" : pr.isDraft ? "draft" : "open";
   // Check runs report a conclusion once completed; commit statuses report a state.
@@ -15,7 +15,7 @@ export function prStatus(pr) {
     : results.every((r) => PASSED.has(r)) ? "passing"
     : "pending";
   const review = pr.reviewDecision === "APPROVED" ? "approved" : pr.reviewDecision === "CHANGES_REQUESTED" ? "changes" : null;
-  return { state, checks, review };
+  return { state, checks, review, branch: pr.headRefName ?? null };
 }
 
 // The column a card belongs in now, or null to leave it: a merged pull request is done, and an
