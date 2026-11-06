@@ -1,0 +1,15 @@
+{
+  "name": "kanban-md",
+  "version": "0.1.0",
+  "description": "Plain-text kanban boards for Herdr, kept as markdown files.",
+  "private": true,
+  "type": "module",
+  "license": "MIT",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "test": "node --test",
+    "check": "node --check mods/kanban-md/main.js && node --check mods/kanban-md/board.js"
+  }
+}
