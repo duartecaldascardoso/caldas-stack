@@ -1,0 +1,6 @@
+{
+  "place": "none",
+  "title": "snappy diff",
+  "focusable": true,
+  "overlay": { "kind": "dialog", "modal": true, "width": 0.96, "height": 0.92 }
+}
