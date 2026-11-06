@@ -1,0 +1,13 @@
+{
+  "zoom": 1,
+  "sounds": {
+    "enabled": true
+  },
+  "font": "Victor Mono",
+  "font_size": 17,
+  "font_ligatures": false,
+  "minimum_contrast": 1,
+  "ui_font": "Victor Mono",
+  "telemetry": false,
+  "theme": "midnight"
+}
