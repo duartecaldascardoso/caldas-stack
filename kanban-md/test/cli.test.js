@@ -39,3 +39,16 @@ test("kanban refuses what it can't do clearly", () => {
   assert.match(kanban(dir, "link", "1", "42").out, /link to "#<number>" or "@<branch>"/);
   assert.match(kanban(dir, "rm", "9").out, /no card 9; the board has 2/);
 });
+
+test("kanban picks the repository's board, from a worktree too", () => {
+  const dir = mkdtempSync(join(tmpdir(), "kanban-"));
+  const repo = join(dir, "app");
+  const git = (...args) => execFileSync("git", args, { cwd: dir, stdio: "ignore" });
+  git("init", "-q", "-b", "main", "app");
+  execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "init"], { cwd: repo });
+  execFileSync("git", ["worktree", "add", "-q", "-b", "feature/x", join(dir, "wt")], { cwd: repo });
+  writeFileSync(join(dir, "app.md"), "# app\n\n## Todo\n- From the app board\n");
+  const show = (cwd) => execFileSync(BIN, [], { cwd, env: { ...process.env, KANBAN_DIR: dir } }).toString();
+  assert.match(show(repo), /# app/);
+  assert.match(show(join(dir, "wt")), /From the app board/);
+});

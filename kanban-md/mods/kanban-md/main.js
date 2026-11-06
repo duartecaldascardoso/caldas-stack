@@ -1,5 +1,5 @@
 // kanban-md: plain-text kanban boards for Herdr, one markdown file per board in ~/kanban.
-import { View, div } from "gpui-kit";
+import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input, Scrollbar, v_virtual_list, VirtualListScrollHandle } from "gpui-base";
 import { home, props, openOverlay, closeOverlay, readTextFile, writeTextFile, exec, focused, notify, run, agents, panes, knownAgents, settings, theme } from "herdr";
 import {
@@ -13,6 +13,8 @@ import { LINE_H, PAD_Y, CHIPS_H, CHIPS_GAP, CARD_GAP, INPUT_H, wrapText, cardHei
 const TEXT_SIZE = 13;
 // Card text sits inside: the column's border, the list's 8px sides, the card's border and 12px sides.
 const CARD_INSET = 2 + 16 + 2 + 24;
+// Room the agent's status takes at the end of a card's first line: Herdr's own marks.
+const markWidth = (agent) => (!agent ? 0 : agent.status === "blocked" ? 76 : 20);
 
 const DIR = `${home()}/kanban`;
 const TRASH = `${DIR}/.trash`;
@@ -99,8 +101,11 @@ export default class Kanban extends View {
   async detectProject() {
     const cwd = focused()?.cwd;
     if (!cwd) return null;
+    // A worktree belongs to its repository: the project is the main checkout's folder.
+    const common = await exec("git", ["-C", cwd, "rev-parse", "--path-format=absolute", "--git-common-dir"]).catch(() => null);
+    const shared = common?.code === 0 ? common.stdout.trim() : "";
     const git = await exec("git", ["-C", cwd, "rev-parse", "--show-toplevel"]).catch(() => null);
-    const root = git?.code === 0 ? git.stdout.trim() : cwd;
+    const root = shared.endsWith("/.git") ? shared.slice(0, -5) : git?.code === 0 ? git.stdout.trim() : cwd;
     if (root === home() || root === "/") return null;
     this.projectRoot = root;
     return boardName(root.split("/").pop());
@@ -581,8 +586,8 @@ export default class Kanban extends View {
     this.scrolls[this.col].scroll_to_item(Math.max(0, row), "top");
   }
 
-  cardCols() {
-    return Math.max(8, Math.floor((this.columnW - CARD_INSET) / this.charW));
+  cardCols(agent = null) {
+    return Math.max(8, Math.floor((this.columnW - CARD_INSET - markWidth(agent)) / this.charW));
   }
 
   // Board tabs on the left, progress on the right.
@@ -619,13 +624,11 @@ export default class Kanban extends View {
     const cards = this.lanes[c];
     const adding = this.editing?.kind === "card" && this.editing.col === c && this.editing.row === null;
     const tint = t[COLUMN_TINTS[c]];
-    const cols = this.cardCols();
     const items = cards.map((text, r) => ({ text, r })).concat(adding ? [{ input: true }] : []);
     const sizes = items.map((item) => {
       const editingThis = this.editing?.kind === "card" && this.editing.col === c && this.editing.row === item.r;
       if (item.input || editingThis) return INPUT_H + CARD_GAP;
-      const chips = Boolean(cardLink(item.text)) || Boolean(this.agentOf(item.text));
-      return cardHeight(wrapText(withoutLink(item.text), cols).length, chips);
+      return cardHeight(wrapText(withoutLink(item.text), this.cardCols(this.agentOf(item.text))).length, Boolean(cardLink(item.text)));
     });
     return v_flex().id(`col-${c}`).flex_1().min_w(0).h_full().rounded(10).border_1()
       .border_color(active ? alpha(t.accent, "66") : t.border).bg(t.background)
@@ -644,7 +647,7 @@ export default class Kanban extends View {
       .when(items.length > 0, (el) => el.child(div().flex_1().min_h(0).relative().px(8).pb(2)
         .child(v_virtual_list(`cards-${c}`, items.length, sizes, (i) => (items[i].input ? "new" : `card-${items[i].r}`), (range) =>
           items.slice(range.start, range.end).map((item, i) => div().h(sizes[range.start + i]).pb(CARD_GAP)
-            .child(item.input ? this.renderInput(t, `new-${c}`) : this.renderCard(t, c, item.r, item.text, cols))))
+            .child(item.input ? this.renderInput(t, `new-${c}`) : this.renderCard(t, c, item.r, item.text))))
           .track_scroll(this.scrolls[c]).size_full()
           .on_item_click((key, cx) => {
             if (!key.startsWith("card-")) return;
@@ -657,21 +660,22 @@ export default class Kanban extends View {
         .child(Scrollbar.vertical(`cards-${c}`).absolute().inset_0())));
   }
 
-  renderCard(t, c, r, text, cols) {
+  renderCard(t, c, r, text) {
     const editing = this.editing;
     if (editing?.kind === "card" && editing.col === c && editing.row === r) return this.renderInput(t, `edit-${c}-${r}`);
     const selected = !editing && c === this.col && r === this.rows[c];
     const done = c === COLUMNS.length - 1;
     const link = cardLink(text);
     const agent = this.agentOf(text);
-    return v_flex().px(12).py(PAD_Y).gap(CHIPS_GAP).rounded(8).border_1().cursor_pointer()
+    return v_flex().relative().px(12).py(PAD_Y).gap(CHIPS_GAP).rounded(8).border_1().cursor_pointer()
       .border_color(selected ? t.accent : t.border).bg(selected ? t.selected : t.raised)
       .hover((s) => s.border_color(selected ? t.accent : t.input))
-      .child(v_flex().text_color(done ? t.muted : t.foreground).children(wrapText(withoutLink(text), cols).map((line) =>
+      .child(v_flex().text_color(done ? t.muted : t.foreground).children(wrapText(withoutLink(text), this.cardCols(agent)).map((line) =>
         h_flex().h(LINE_H).items_center().whitespace_nowrap().child(line))))
-      .when(Boolean(link) || Boolean(agent), (el) => el.child(h_flex().h(CHIPS_H).gap(6).items_center()
-        .when(Boolean(link), (row) => row.child(this.renderLink(t, link, this.statusOf(text), done)))
-        .when(Boolean(agent), (row) => row.child(this.renderAgent(t, agent)))));
+      .when(Boolean(link), (el) => el.child(h_flex().h(CHIPS_H).items_center().child(this.renderLink(t, link, this.statusOf(text), done))))
+      // The agent's status sits at the end of the first line, where it can't be pushed out.
+      .when(Boolean(agent), (el) => el.child(h_flex().absolute().top(PAD_Y + 1).right(10).h(LINE_H).items_center()
+        .child(this.agentMark(t, agent))));
   }
 
   // The card's pull request as a chip: a dot for its state, the number, then checks and review.
@@ -690,11 +694,16 @@ export default class Kanban extends View {
   }
 
   // The agent on the card's branch: a dot in Herdr's colour for its status, and the status.
-  renderAgent(t, agent) {
-    const color = t[agent.status] ?? t.dim;
-    return h_flex().px(7).py(2).gap(6).items_center().flex_none().rounded(5).bg(t.background).border_1().border_color(t.border).text_size(11)
-      .child(div().size(6).rounded(3).bg(color).when(agent.status === "working", (el) => el.loop("opacity", { from: 0.35, to: 1, period: 1200 })))
-      .child(div().text_color(t.muted).child(agent.status === "done" ? "ready" : agent.status));
+  // Herdr's own marks, as its agents sidebar draws them: a turning ring while working, "Needs you"
+  // when blocked, a filled dot when done, a hollow ring when idle.
+  agentMark(t, agent) {
+    if (agent.status === "working") return svg("mods/workspace-chrome/spinner.svg").size(12).flex_none().text_color(t.working).spin(900);
+    if (agent.status === "blocked") {
+      return div().flex_none().px(6).h(18).rounded(5).bg(alpha(t.blocked, "26")).text_size(10.5).font_semibold()
+        .text_color(t.blocked).flex().items_center().child("Needs you");
+    }
+    if (agent.status === "idle") return div().size(7).mx(2).flex_none().rounded(4).border(1.5).border_color(t.idle ?? t.dim);
+    return div().size(7).mx(2).flex_none().rounded(4).bg(t.done);
   }
 
   renderInput(t, id) {
@@ -726,7 +735,11 @@ export default class Kanban extends View {
       : link ? [["g", "open diff"], ...(repo && !this.agentOf(card) ? [["s", "start work"]] : []), ...(link.branch ? [["o", "open pull request"]] : [])]
       : repo ? [["s", "start work"], ["@", "link branch"], ["o", "open pull request"]] : [];
     const offer = this.project && !this.boards.includes(this.project) ? [["p", `board for ${this.project}`]] : [];
+    const agent = card != null ? this.agentOf(card) : null;
+    const doing = { working: "is working", blocked: "needs you", done: "is ready for review", idle: "is idle" };
     return line
+      .when(Boolean(agent), (el) => el.child(h_flex().gap(6).items_center().text_color(t.muted)
+        .child(this.agentMark(t, agent)).child(`${agent.name ?? "Agent"} ${doing[agent.status] ?? agent.status}`)))
       .when(Boolean(status), (el) => el.child(div().text_color(t.muted).child(describe(link.pr, status))))
       .child(this.keys(t, [...offer, ...linked, ...HINTS]));
   }

@@ -29,7 +29,7 @@ export function agentsByBranch(agents, panes) {
     if (!branch) continue;
     const seen = out.get(branch);
     if (seen && URGENCY[seen.status] >= URGENCY[agent.status]) continue;
-    out.set(branch, { status: agent.status, address: agent.address, name: agent.tab_name || agent.title });
+    out.set(branch, { status: agent.status, address: agent.address, name: agent.program?.name || agent.app || "Agent" });
   }
   return out;
 }

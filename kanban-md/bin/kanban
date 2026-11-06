@@ -29,10 +29,13 @@ function fail(message) {
   throw new UsageError(message);
 }
 
-// The current repository's board when there is one, like the board opens it.
+// The current repository's board when there is one, like the board opens it. A worktree belongs
+// to its repository: the board is named after the main checkout's folder.
 function defaultBoard() {
   try {
-    const root = execFileSync("git", ["rev-parse", "--show-toplevel"], { stdio: ["ignore", "pipe", "ignore"] }).toString().trim();
+    const git = (...args) => execFileSync("git", args, { stdio: ["ignore", "pipe", "ignore"] }).toString().trim();
+    const common = git("rev-parse", "--path-format=absolute", "--git-common-dir");
+    const root = common.endsWith("/.git") ? common.slice(0, -5) : git("rev-parse", "--show-toplevel");
     const name = basename(root);
     if (existsSync(join(DIR, `${name}.md`))) return name;
   } catch {

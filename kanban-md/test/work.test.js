@@ -21,15 +21,15 @@ test("cardBranch prefers the card's own branch, then its pull request's", () => 
 
 test("agentsByBranch joins agents to their pane's branch, most urgent first", () => {
   const agents = [
-    { pane: "p1", status: "working", address: "t1", tab_name: "pricing" },
-    { pane: "p2", status: "blocked", address: "t2", tab_name: "pricing 2" },
-    { pane: "p3", status: "idle", address: "t3", title: "main" },
+    { pane: "p1", status: "working", address: "t1", program: { name: "Codex" } },
+    { pane: "p2", status: "blocked", address: "t2", program: { name: "Claude Code" } },
+    { pane: "p3", status: "idle", address: "t3", app: "pi" },
     { pane: "p4", status: "working", address: "t4" },
   ];
   const panes = [{ pane: "p1", branch: "feature/pricing" }, { pane: "p2", branch: "feature/pricing" }, { pane: "p3", branch: "main" }, { pane: "p4", branch: null }];
   const by = agentsByBranch(agents, panes);
-  assert.deepEqual(by.get("feature/pricing"), { status: "blocked", address: "t2", name: "pricing 2" });
-  assert.equal(by.get("main").name, "main");
+  assert.deepEqual(by.get("feature/pricing"), { status: "blocked", address: "t2", name: "Claude Code" });
+  assert.equal(by.get("main").name, "pi");
   assert.equal(by.size, 2);
 });
 
