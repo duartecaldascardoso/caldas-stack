@@ -54,13 +54,15 @@ A native port of [snappy-diff](https://github.com/duartecaldascardoso/snappy-dif
 | `v` | Mark file viewed |
 | Click a line number | Comment on it (`⇧`-click for a range) |
 | `o` | Open the file in your editor |
-| `⌘K` | Go to a file, commit or action |
-| `⌘F` | Search the code in the diff |
+| `⌘K` | Go to a file, commit or action; a file opens on its own (`esc` shows them all) |
+| `⌘F` | Search the code in the diff, and open the match's file on its own |
+| Click `⋯ N unmodified lines` | Show the lines it hides |
+| Click `+N −N` | Changes by kind: code, tests, config, CI, docs; pick one to filter the tree |
 | `/` | Filter the file tree |
 | `⌘B` | Toggle the sidebar |
 | `?` | Settings: split or unified, whitespace, editor |
 
-**Send to agent** types your comments, with files, lines and code, into the agent working on that branch; when the code they were on changes, it tells you they were addressed. The copy button puts the same prompt on the clipboard. Viewed files and comments are kept per branch. Pull requests are fetched with the GitHub CLI (`gh`).
+Code that was only moved is faded, and its file header says how many lines moved. **Send to agent** types your comments, with files, lines and code, into the agent working on that branch; when the code they were on changes, it tells you they were addressed. The copy button puts the same prompt on the clipboard. Viewed files and comments are kept per branch. Pull requests are fetched with the GitHub CLI (`gh`).
 
 ## herdr
 

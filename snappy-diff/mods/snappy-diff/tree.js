@@ -78,3 +78,17 @@ export function kindOf(file) {
   if (/\.(json|ya?ml|toml|ini|cfg|conf|lock)$|(^|\/)(\.[^/]+rc|dockerfile|makefile)$|\.config\.[a-z]+$/.test(path)) return "config";
   return "code";
 }
+
+export const KINDS = [["code", "Code"], ["tests", "Tests"], ["config", "Config"], ["ci", "CI"], ["docs", "Docs"]];
+
+// Added and removed lines per kind, in KINDS order, leaving out kinds with no files.
+export function breakdown(files) {
+  const by = new Map();
+  for (const file of files) {
+    const kind = by.get(kindOf(file)) ?? { add: 0, del: 0 };
+    kind.add += file.add;
+    kind.del += file.del;
+    by.set(kindOf(file), kind);
+  }
+  return KINDS.filter(([id]) => by.has(id)).map(([id, label]) => ({ id, label, ...by.get(id) }));
+}

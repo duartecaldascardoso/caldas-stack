@@ -202,3 +202,46 @@ test("comments know their code and turn into an agent prompt", () => {
   assert.match(prompt, /1\. `src\/app\.js:2`/);
   assert.match(prompt, /```js\nconst b = 3;\n```\nWhy 3\?/);
 });
+
+test("findMoves marks runs of removed lines that reappear as added lines", async () => {
+  const { findMoves, isMoved } = await import("../mods/snappy-diff/moved.js");
+  const block = ["function total(items) {", "  let sum = 0;", "  for (const item of items) sum += item.price;", "  return sum;"];
+  const patch = `diff --git a/a.js b/a.js
+index 1111111111111111111111111111111111111111..2222222222222222222222222222222222222222 100644
+--- a/a.js
++++ b/a.js
+@@ -1,4 +0,0 @@
+${block.map((l) => `-${l}`).join("\n")}
+diff --git a/b.js b/b.js
+index 3333333333333333333333333333333333333333..4444444444444444444444444444444444444444 100644
+--- a/b.js
++++ b/b.js
+@@ -1,1 +1,6 @@
+ const x = 1;
++// moved here
+${block.map((l) => `+    ${l}`).join("\n")}
+`;
+  const moves = findMoves(parsePatch(patch));
+  assert.equal(moves.perFile.get("a.js"), 4);
+  assert.equal(moves.perFile.get("b.js"), 4);
+  assert.equal(isMoved(moves, "b.js", "new", 3), true);
+  assert.equal(isMoved(moves, "b.js", "new", 2), false); // the comment is new
+});
+
+test("breakdown sums lines by kind of file", async () => {
+  const { breakdown } = await import("../mods/snappy-diff/tree.js");
+  assert.deepEqual(breakdown([
+    { name: "src/a.js", add: 5, del: 1 }, { name: "src/a.test.js", add: 3, del: 0 }, { name: "README.md", add: 2, del: 2 },
+  ]), [
+    { id: "code", label: "Code", add: 5, del: 1 }, { id: "tests", label: "Tests", add: 3, del: 0 }, { id: "docs", label: "Docs", add: 2, del: 2 },
+  ]);
+});
+
+test("fileRows opens a separator into the lines it hid", () => {
+  const app = parsePatch(PATCH)[0];
+  const lines = Array.from({ length: 12 }, (_, i) => `line ${i + 1}`);
+  const rows = fileRows(app, "split", null, { lines, gaps: new Set([1]) });
+  assert.equal(rows.some((r) => r.t === "hunk"), false);
+  const opened = rows.filter((r) => r.t === "split" && r.right?.text.startsWith("line "));
+  assert.deepEqual(opened.map((r) => [r.left.n, r.right.n]), [[5, 6], [6, 7], [7, 8], [8, 9], [9, 10]]);
+});

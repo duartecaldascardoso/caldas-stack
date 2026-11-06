@@ -134,3 +134,13 @@ export async function fetchPullRequest(repo, pr) {
   if (result.code !== 0) throw new Error(result.stderr.trim() || `couldn't fetch #${pr.number}`);
   return { base: `origin/${pr.baseRefName}`, head };
 }
+
+// A file's text on the new side of the diff, for expanding the lines a separator hides:
+// its blob when git has one, otherwise (uncommitted) what is on disk.
+export async function fileText(repo, file, worktree) {
+  if (file.newOid && !/^0+$/.test(file.newOid)) {
+    const result = await exec("git", ["-C", repo, ...READ, "cat-file", "blob", file.newOid]);
+    if (result.code === 0) return result.stdout;
+  }
+  return worktree ? readTextFile(`${repo}/${file.name}`) : null;
+}

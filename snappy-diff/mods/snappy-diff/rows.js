@@ -3,9 +3,10 @@ import { wordDiff } from "./words.js";
 import { highlight } from "./syntax.js";
 
 // A cell is one side of one line: { n, text, kind: "ctx" | "add" | "del", tokens, marks }.
-// Rows: { t: "hunk", hidden, context } between hunks; { t: "split", left, right } or
+// Rows: { t: "hunk", hunk, hidden, context } between hunks; { t: "split", left, right } or
 // { t: "unified", cell, old, new } for lines; { t: "notice", text } for files without lines.
-export function fileRows(file, style, lang) {
+// `expanded`, when the file's text is known, opens separators: { lines, gaps: Set of hunk indexes }.
+export function fileRows(file, style, lang, expanded = null) {
   if (file.tooLarge) return [{ t: "notice", text: `Too large to show: ${(file.add + file.del).toLocaleString()} lines changed` }];
   if (file.binary) return [{ t: "notice", text: "Binary file not shown" }];
   if (!file.hunks.length) {
@@ -13,19 +14,26 @@ export function fileRows(file, style, lang) {
     return [{ t: "notice", text }];
   }
   const rows = [];
+  const contextRow = (cell) => (style === "split"
+    ? { t: "split", left: { ...cell, n: cell.old }, right: { ...cell, n: cell.new } }
+    : { t: "unified", cell, old: cell.old, new: cell.new });
   let shownTo = 1; // the next new-side line number after the last hunk shown
-  for (const hunk of file.hunks) {
+  file.hunks.forEach((hunk, index) => {
     // A separator stands for the unchanged lines it hides; a file changed from line 1 has none.
     const hidden = Math.max(0, hunk.newStart - shownTo);
-    if (hidden) rows.push({ t: "hunk", hidden, context: hunk.context });
+    if (hidden && expanded?.lines && expanded.gaps.has(index)) {
+      const offset = hunk.newStart - hunk.oldStart; // context reads the same on both sides
+      const texts = expanded.lines.slice(shownTo - 1, hunk.newStart - 1);
+      highlight(lang, texts).forEach((tokens, i) => {
+        const n = shownTo + i;
+        rows.push(contextRow({ kind: "ctx", text: texts[i], old: n - offset, new: n, tokens, marks: null }));
+      });
+    } else if (hidden) rows.push({ t: "hunk", hunk: index, hidden, context: hunk.context });
     shownTo = hunk.newStart + hunk.newCount;
     const cells = hunkCells(hunk, lang);
     for (let i = 0; i < cells.length;) {
       if (cells[i].kind === "ctx") {
-        const cell = cells[i++];
-        rows.push(style === "split"
-          ? { t: "split", left: { ...cell, n: cell.old }, right: { ...cell, n: cell.new } }
-          : { t: "unified", cell, old: cell.old, new: cell.new });
+        rows.push(contextRow(cells[i++]));
         continue;
       }
       const dels = [];
@@ -42,7 +50,7 @@ export function fileRows(file, style, lang) {
         for (const cell of adds) rows.push({ t: "unified", cell, old: null, new: cell.new });
       }
     }
-  }
+  });
   return rows;
 }
 

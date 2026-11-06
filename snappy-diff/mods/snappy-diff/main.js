@@ -6,7 +6,8 @@ import * as git from "./git.js";
 import { parsePatch, skippedFiles, firstChange } from "./patch.js";
 import { languageOf } from "./syntax.js";
 import { fileRows, wrapCount, wrapLines, segments } from "./rows.js";
-import { treeRows, fileMatches } from "./tree.js";
+import { treeRows, fileMatches, breakdown } from "./tree.js";
+import { findMoves, isMoved } from "./moved.js";
 import { reviewKey, emptyReview, isViewed, changedSinceViewed, toggleViewed, linesText, withStatus, reviewPrompt } from "./review.js";
 import { DEFAULT_PREFS, readPrefs, writePrefs, readReview, writeReview } from "./store.js";
 
@@ -26,6 +27,8 @@ const EDITOR_H = 96;
 const REFRESH_MS = 2000; // uncommitted changes move under our feet
 // Fixed-width parts of a file header, from the right edge, so a click can tell them apart.
 const HEADER_PARTS = { viewed: 92, stats: 120, comments: 44, editor: 32 };
+const HEADER_PAD = 14;
+const RIGHT_MENUS = new Set(["settings", "agent", "kinds"]);
 const EDITORS = { zed: "Zed", vscode: "VS Code", cursor: "Cursor" };
 const SYNTAX = { keyword: "ansi5", string: "ansi2", number: "ansi3", constant: "ansi3", function: "ansi4", type: "ansi6", property: "ansi4" };
 
@@ -82,7 +85,13 @@ export default class SnappyDiff extends View {
     this.handle = cx.focus_handle();
     this.scroll = VirtualListScrollHandle.new();
     this.treeScroll = VirtualListScrollHandle.new();
+    this.only = null; // a file opened from go-to or search, shown alone
+    this.expanded = new Map(); // file id -> { lines, gaps }: separators opened to their lines
+    this.moves = findMoves([]);
     this.filterInput = this.input("Filter files, or is:tests", (value) => { this.filter = value; });
+    // Typing goes to the filter only while it has the keyboard.
+    this.filterInput.on("focus", (_e, cx) => { this.filtering = true; cx.notify(); });
+    this.filterInput.on("blur", (_e, cx) => { this.filtering = false; cx.notify(); });
     this.menuInput = this.input("Filter…", () => { this.menuIndex = 0; });
     this.paletteInput = this.input("", () => { this.paletteIndex = 0; });
     this.commentInput = InputState.new({ placeholder: "Leave a comment" });
@@ -175,6 +184,8 @@ export default class SnappyDiff extends View {
       const before = this.openCommentIds();
       this.text = text;
       this.files = [...parsePatch(text, rev), ...skippedFiles(skipped, rev)];
+      this.moves = findMoves(this.files);
+      if (key !== this.reviewKey || !this.files.some((f) => f.id === this.only)) this.only = null;
       this.commits = commits;
       this.ms = Date.now() - started;
       if (sameReview) this.noticeAddressed(before);
@@ -200,6 +211,8 @@ export default class SnappyDiff extends View {
         this.text = text;
         const rev = ++this.rev;
         this.files = [...parsePatch(text, rev, this.files), ...skippedFiles(skipped, rev)];
+        this.moves = findMoves(this.files);
+        if (!this.files.some((f) => f.id === this.only)) this.only = null;
         this.noticeAddressed(before);
         this.rebuild();
         cx.notify();
@@ -242,9 +255,30 @@ export default class SnappyDiff extends View {
   }
 
   rowsFor(file) {
-    const key = `${file.id}|${file.rev}|${this.prefs.diffStyle}`;
-    if (!this.rowsCache.has(key)) this.rowsCache.set(key, fileRows(file, this.prefs.diffStyle, languageOf(file.name)));
+    const open = this.expanded.get(file.id);
+    const key = `${file.id}|${file.rev}|${this.prefs.diffStyle}|${open ? [...open.gaps].join(",") : ""}`;
+    if (!this.rowsCache.has(key)) this.rowsCache.set(key, fileRows(file, this.prefs.diffStyle, languageOf(file.name), open));
     return this.rowsCache.get(key);
+  }
+
+  // Opens a separator: loads the file's text once, then shows the lines it hid.
+  expandGap(file, hunk, cx) {
+    const open = this.expanded.get(file.id);
+    if (open?.lines) {
+      this.expanded.set(file.id, { ...open, gaps: new Set([...open.gaps, hunk]) });
+      this.rebuild();
+      return cx.notify();
+    }
+    cx.spawn(async (cx) => {
+      const text = await git.fileText(this.source.repo, file, !this.source.head && !this.source.commit).catch(() => null);
+      if (text == null) {
+        notify({ title: "Couldn't load the hidden lines", body: file.name, level: "warning", timeout: 2500 });
+        return;
+      }
+      this.expanded.set(file.id, { lines: text.replaceAll("\t", "    ").split("\n"), gaps: new Set([hunk]) });
+      this.rebuild();
+      cx.notify();
+    });
   }
 
   rebuild() {
@@ -256,7 +290,7 @@ export default class SnappyDiff extends View {
     const push = (item, size) => { items.push(item); sizes.push(size); };
     this.fileStarts = [];
     this.headerIndex = new Map();
-    for (const f of this.files) {
+    for (const f of this.only ? this.files.filter((file) => file.id === this.only) : this.files) {
       this.fileStarts.push(items.length);
       this.headerIndex.set(f.id, items.length);
       push({ t: "file", f }, HEADER_H);
@@ -304,12 +338,32 @@ export default class SnappyDiff extends View {
       if (this.fileStarts[mid] <= this.topIndex) lo = mid;
       else hi = mid - 1;
     }
-    return this.files[lo];
+    return this.only ? this.files.find((f) => f.id === this.only) : this.files[lo];
   }
 
   // Moving around
 
+  // Shows one file on its own, as opening it from go-to or search does.
+  focusFile(id, cx) {
+    this.only = id;
+    this.open.set(id, true);
+    this.rebuild();
+    this.topIndex = 0;
+    this.scroll.scroll_to_item(0, "top");
+    this.followTree(id);
+    cx.notify();
+  }
+
+  showAll(cx) {
+    const id = this.only;
+    this.only = null;
+    this.rebuild();
+    if (id) this.jumpToFile(id, cx);
+    cx.notify();
+  }
+
   jumpToFile(id, cx) {
+    if (this.only) return this.focusFile(id, cx);
     const file = this.files.find((f) => f.id === id);
     if (!file) return;
     if (this.isCollapsed(file)) this.open.set(id, true);
@@ -521,13 +575,13 @@ export default class SnappyDiff extends View {
       "v": () => { const f = this.activeFile(); if (f) this.toggleViewed(f, cx, true); },
       "o": () => this.openInEditor(this.activeFile(), cx),
       "x": () => { const f = this.activeFile(); if (f) this.toggleCollapsed(f, cx); },
-      "/": () => { this.prefs.sidebar || this.setPref("sidebar", true, cx); this.filtering = true; this.filterInput.focus(); cx.notify(); },
+      "/": () => { if (!this.prefs.sidebar) this.setPref("sidebar", true, cx); this.filterInput.focus(); },
       "cmd-b": () => this.setPref("sidebar", !this.prefs.sidebar, cx),
       "cmd-k": () => this.openPalette("all", cx),
       "cmd-f": () => this.openPalette("lines", cx),
       "shift-/": () => this.openMenu("settings", cx),
       "?": () => this.openMenu("settings", cx),
-      "escape": () => this.close(),
+      "escape": () => (this.only ? this.showAll(cx) : this.close()),
     };
     if (actions[k]) { actions[k](); cx.stop_propagation(); }
   }
@@ -541,7 +595,7 @@ export default class SnappyDiff extends View {
     const button = this.pressed;
     const view = this.viewBounds;
     this.menuAt = button && view
-      ? (name === "settings" || name === "agent" ? { right: view.x + view.width - (button.x + button.width) } : { left: button.x - view.x })
+      ? (RIGHT_MENUS.has(name) ? { right: view.x + view.width - (button.x + button.width) } : { left: button.x - view.x })
       : { right: 10 };
     this.pressed = null;
     this.menuIndex = 0;
@@ -560,6 +614,20 @@ export default class SnappyDiff extends View {
     if (this.menu === "head") {
       return [{ label: "Working tree", current: !s.head, pick: (cx) => this.reload({ head: "", commit: null }, cx) },
         ...refs.map((r) => ({ label: r, current: r === s.head, pick: (cx) => this.reload({ head: r, commit: null }, cx) }))].filter(match);
+    }
+    if (this.menu === "kinds") {
+      return breakdown(this.files).map((k) => ({
+        label: k.label, hint: `+${k.add.toLocaleString()} −${k.del.toLocaleString()}`,
+        current: this.filter.trim() === `is:${k.id}`,
+        pick: (cx) => {
+          this.menu = null;
+          this.filterInput.set_value(`is:${k.id}`);
+          this.filter = `is:${k.id}`;
+          if (!this.prefs.sidebar) this.setPref("sidebar", true, cx);
+          this.handle.focus();
+          cx.notify();
+        },
+      }));
     }
     if (this.menu === "agent") {
       return this.reviewAgents().map((candidate) => ({
@@ -619,7 +687,7 @@ export default class SnappyDiff extends View {
             if (line.kind !== "+") old++;
             if (line.kind !== "-") next++;
             if (!line.text.toLowerCase().includes(needle)) continue;
-            out.push({ label: line.text.trim(), hint: `${f.name}:${n}`, run: (cx) => this.jumpToLine(f.id, side, n, cx) });
+            out.push({ label: line.text.trim(), hint: `${f.name}:${n}`, run: (cx) => { this.focusFile(f.id, cx); this.jumpToLine(f.id, side, n, cx); } });
             if (out.length >= 100) return out;
           }
         }
@@ -628,7 +696,7 @@ export default class SnappyDiff extends View {
     }
     const s = this.source;
     const files = this.files.filter((f) => !query || fileMatches(f, query)).slice(0, 40)
-      .map((f) => ({ label: f.name, hint: `+${f.add} −${f.del}`, run: (cx) => this.jumpToFile(f.id, cx) }));
+      .map((f) => ({ label: f.name, hint: `+${f.add} −${f.del}`, run: (cx) => this.focusFile(f.id, cx) }));
     const commits = this.commits.filter((c) => !query || `${c.sha} ${c.subject}`.toLowerCase().includes(query.toLowerCase())).slice(0, 20)
       .map((c) => ({ label: `${c.sha.slice(0, 7)} ${c.subject}`, hint: "commit", run: (cx) => this.reload({ commit: c.sha }, cx) }));
     const actions = [
@@ -668,27 +736,41 @@ export default class SnappyDiff extends View {
 
   // Clicks on diff rows: one handler for the list, told apart by where the press landed.
 
+  // Which part of a file header a press `fromRight` px from its right edge landed on.
+  headerPart(fromRight) {
+    const x = fromRight - HEADER_PAD;
+    const editorAt = HEADER_PARTS.viewed + HEADER_PARTS.stats + HEADER_PARTS.comments;
+    if (x < HEADER_PARTS.viewed) return "viewed";
+    if (x >= editorAt && x < editorAt + HEADER_PARTS.editor) return "editor";
+    return "header";
+  }
+
+  pressHeader(file, part, cx) {
+    if (part === "viewed") return this.toggleViewed(file, cx);
+    if (part === "editor") return this.openInEditor(file, cx);
+    return this.toggleCollapsed(file, cx);
+  }
+
   clickRow(key, cx) {
     const item = this.items[Number(key)];
     const press = this.press;
     if (!item || !press) return;
     const m = this.metrics();
-    const fromRight = m.width - press.x;
+    const fromRight = this.mainW - press.x;
     const f = item.f;
-    if (item.t === "file") {
-      if (fromRight < HEADER_PARTS.viewed) return this.toggleViewed(f, cx);
-      const editorAt = HEADER_PARTS.viewed + HEADER_PARTS.stats + HEADER_PARTS.comments;
-      if (fromRight >= editorAt && fromRight < editorAt + HEADER_PARTS.editor) return this.openInEditor(f, cx);
-      return this.toggleCollapsed(f, cx);
-    }
+    if (item.t === "file") return this.pressHeader(f, this.headerPart(fromRight), cx);
+    if (item.t === "hunk") return this.expandGap(f, item.hunk, cx);
+    // Comment cards: 16px row padding, a 1px border and 10px card padding before the buttons,
+    // which are fixed-width and right-aligned (renderComment, renderEditor).
+    const inCard = fromRight - 27;
     if (item.t === "comment") {
-      if (fromRight < 70) return this.deleteComment(item.c.id, cx);
-      if (fromRight < 130) return this.editComment(item.c, cx);
+      if (inCard >= 0 && inCard < 54) return this.deleteComment(item.c.id, cx);
+      if (inCard >= 54 && inCard < 108) return this.editComment(item.c, cx);
       return;
     }
     if (item.t === "editor") {
-      if (fromRight < 110) return this.saveComment(cx);
-      if (fromRight < 190) return this.cancelComment(cx);
+      if (inCard >= 0 && inCard < 84) return this.saveComment(cx);
+      if (inCard >= 84 && inCard < 162) return this.cancelComment(cx);
       return;
     }
     if (item.t === "split") {
@@ -776,7 +858,9 @@ export default class SnappyDiff extends View {
       .child(div().flex_1())
       .when(files.length > 0, (el) => el.child(h_flex().gap(10).mr(4).text_size(12).text_color(t.muted).whitespace_nowrap()
         .child(`${viewed}/${files.length} viewed`)
-        .child(h_flex().gap(4).child(div().text_color(t.ansi2).child(`+${add.toLocaleString()}`)).child(div().text_color(t.ansi1).child(`−${del.toLocaleString()}`)))
+        .child(h_flex().id("kinds").gap(4).px(4).rounded(4).cursor_pointer().hover((st) => st.bg(t.hover))
+          .on_mouse_down("left", (e) => this.pressAt(e)).on_click((_e, cx) => this.openMenu("kinds", cx))
+          .child(div().text_color(t.ansi2).child(`+${add.toLocaleString()}`)).child(div().text_color(t.ansi1).child(`−${del.toLocaleString()}`)))
         .when(this.ms != null, (el) => el.child(`${this.ms} ms`))))
       .when(openComments > 0, (el) => el
         .child(h_flex().id("send-agent").h(28).px(10).gap(6).items_center().rounded_l(6).border_1().border_color(t.border)
@@ -796,7 +880,7 @@ export default class SnappyDiff extends View {
 
   renderMenu(t) {
     const options = this.menuOptions().slice(0, 200);
-    const searchable = this.menu !== "settings";
+    const searchable = this.menu !== "settings" && this.menu !== "kinds";
     const at = this.menuAt ?? { right: 10 };
     const panel = v_flex().id("menu").absolute().top(TOOLBAR_H + 2).w(this.menu === "commit" ? 420 : 300).p(4).gap(2)
       .rounded(8).border_1().border_color(t.border).bg(t.popover).shadow_lg()
@@ -829,10 +913,11 @@ export default class SnappyDiff extends View {
           .child(icon("search", 13)).child(div().flex_1().child("Go to…")).child(h_flex().gap(3).child(keycap("⌘")).child(keycap("K"))))
         .child(h_flex().h(32).px(8).gap(8).items_center().rounded(6).border_1().border_color(this.filtering ? t.accent : t.input)
           .child(div().text_color(t.dim).child(icon("search", 13)))
-          .child(div().flex_1().min_w(0).on_mouse_down("left", (_e, cx) => { this.filtering = true; cx.notify(); })
+          .child(div().flex_1().min_w(0)
             .child(Input.new(this.filterInput).w_full().text_size(12)))
           .when(Boolean(this.filter), (el) => el.child(div().text_size(11).text_color(t.dim).child(`${shown}/${this.files.length}`)))))
       .child(div().flex_1().min_h(0).relative()
+        .on_mouse_down("left", () => this.handle.focus())
         .child(v_virtual_list("tree", rows.length, TREE_ROW_H, (i) => rows[i].kind === "dir" ? `d:${rows[i].path}` : `f:${rows[i].id}`,
           (range) => rows.slice(range.start, range.end).map((row) => this.treeRow(t, row, active)))
           .track_scroll(this.treeScroll).size_full()
@@ -870,9 +955,19 @@ export default class SnappyDiff extends View {
     return v_flex().id("main").flex_1().min_w(0).h_full().relative()
       .on_size_change((size, cx) => { if (Math.abs(size.width - this.mainW) > 1) { this.mainW = size.width; this.rebuild(); cx.notify(); } })
       .when(!this.files.length, (el) => el.child(this.renderEmpty(t)))
+      .when(Boolean(this.only), (el) => el.child(h_flex().id("only").h(32).flex_none().px(16).gap(8).items_center()
+        .border_b_1().border_color(t.border).bg(alpha(t.accent, "14")).text_size(12).text_color(t.muted)
+        .child("Showing one file")
+        .child(div().flex_1())
+        .child(h_flex().id("show-all").h(24).px(8).gap(6).items_center().rounded(5).cursor_pointer().text_color(t.foreground)
+          .hover((st) => st.bg(t.hover)).on_click((_e, cx) => this.showAll(cx))
+          .child(this.files.length === 1 ? "Show the whole diff" : `Show all ${this.files.length} files`).child(div().text_color(t.dim).child("esc")))))
       .when(this.files.length > 0, (el) => el
         .child(div().id("diff-wrap").flex_1().min_h(0).relative()
-          .on_mouse_down("left", (e) => { if (e.local_position) this.press = { x: e.local_position.x, shift: e.modifiers.shift }; })
+          .on_mouse_down("left", (e) => {
+            if (e.local_position) this.press = { x: e.local_position.x, shift: e.modifiers.shift };
+            if (!this.editing) this.handle.focus();
+          })
           .on_scroll_wheel((_e, cx) => { cx.notify(); cx.timer.after(60, (cx) => cx.notify()); })
           .child(v_virtual_list("diff", this.items.length, this.sizes, (i) => String(i), (range) => {
             this.topIndex = range.start;
@@ -880,7 +975,6 @@ export default class SnappyDiff extends View {
           }).track_scroll(this.scroll).size_full().on_item_click((key, cx) => this.clickRow(key, cx)))
           .child(Scrollbar.vertical("diff").absolute().inset_0())
           .when(Boolean(pinned), (el) => el.child(div().absolute().top(0).left(0).right(0)
-            .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
             .child(this.renderHeader(t, pinned, true))))));
   }
 
@@ -905,17 +999,19 @@ export default class SnappyDiff extends View {
     const row = h_flex().h(h).w_full().font_family(code).text_size(CODE_SIZE);
     if (item.t === "hunk") {
       return row.items_center().px(16).gap(10).bg(alpha(t.foreground, "08")).text_color(t.dim)
-        .child(item.hidden ? `⋯ ${plural(item.hidden, "unmodified line")}` : "⋯")
-        .when(Boolean(item.context), (el) => el.child(div().truncate().text_color(t.muted).child(item.context)));
+        .cursor_pointer().hover((st) => st.bg(alpha(t.foreground, "10")))
+        .child(icon("expand", 12))
+        .child(plural(item.hidden, "unmodified line"))
+        .when(Boolean(item.context), (el) => el.child(div().flex_1().min_w(0).truncate().text_color(t.muted).child(item.context)));
     }
     if (item.t === "notice") return row.items_center().px(16).text_color(t.dim).child(item.text);
     if (item.t === "comment") return this.renderComment(t, item.c);
     if (item.t === "editor") return this.renderEditor(t, item.e);
     const m = this.metrics();
     if (item.t === "split") {
-      return row.child(this.renderCell(t, item.left, m, m.side, h, "old"))
+      return row.child(this.renderCell(t, item.left, m, m.side, h, "old", item.f))
         .child(div().w(1).h_full().bg(t.border))
-        .child(this.renderCell(t, item.right, m, m.width - m.side - 1, h, "new"));
+        .child(this.renderCell(t, item.right, m, m.width - m.side - 1, h, "new", item.f));
     }
     return row.child(this.renderUnified(t, item, m, h));
   }
@@ -926,7 +1022,12 @@ export default class SnappyDiff extends View {
     return { bg: null, gutter: null, mark: null, bar: null };
   }
 
-  renderCell(t, cell, m, width, h, side) {
+  // Moved code needs little reading: it is faded.
+  moved(file, cell) {
+    return cell.kind !== "ctx" && isMoved(this.moves, file.id, cell.kind === "del" ? "old" : "new", cell.n ?? (cell.kind === "del" ? cell.old : cell.new));
+  }
+
+  renderCell(t, cell, m, width, h, side, file) {
     if (!cell) {
       return div().w(width).h(h).flex_none().relative().overflow_hidden().bg(alpha(t.foreground, "05"))
         .child(svg(`${ICONS}/hatch.svg`).absolute().top(0).left(0).w(1200).h(1200).text_color(alpha(t.foreground, "1c")));
@@ -939,7 +1040,7 @@ export default class SnappyDiff extends View {
       .child(h_flex().w(m.number).h_full().flex_none().items_start().justify_end().pr(10).text_color(colors.bar ?? t.dim)
         .when(Boolean(colors.gutter), (el) => el.bg(colors.gutter).border_l_2().border_color(colors.bar))
         .child(div().h(LINE_H).flex().items_center().child(String(cell.n))))
-      .child(this.renderText(t, cell, m.cols, colors));
+      .child(this.renderText(t, cell, m.cols, colors).when(this.moved(file, cell), (el) => el.opacity(0.45)));
   }
 
   renderUnified(t, item, m, h) {
@@ -952,7 +1053,7 @@ export default class SnappyDiff extends View {
         .child(number(item.old)).child(number(item.new)))
       .child(div().w(16).flex_none().h(LINE_H).flex().items_center().justify_center().text_color(colors.bar ?? t.dim)
         .child(cell.kind === "add" ? "+" : cell.kind === "del" ? "-" : ""))
-      .child(this.renderText(t, cell, m.cols, colors));
+      .child(this.renderText(t, cell, m.cols, colors).when(this.moved(item.f, cell), (el) => el.opacity(0.45)));
   }
 
   // The cell's text, wrapped at `cols` characters, coloured by syntax and word change.
@@ -987,6 +1088,7 @@ export default class SnappyDiff extends View {
         .when(Boolean(f.prevName), (el) => el.child(div().ml(8).text_color(t.dim).child(`← ${f.prevName}`))))
       .when(Boolean(label), (el) => el.child(tag(label, false)))
       .when(changedSinceViewed(this.review, f), (el) => el.child(tag("changed since viewed", true)))
+      .when((this.moves.perFile.get(f.id) ?? 0) > 0, (el) => el.child(div().ml(2).text_size(11.5).text_color(t.dim).child(`${this.moves.perFile.get(f.id)} moved`)))
       .child(part(HEADER_PARTS.editor).child(f.type === "deleted" ? div() : div().text_color(t.dim).child(icon("editor", 13))))
       .child(part(HEADER_PARTS.comments).gap(4).text_size(12).text_color(t.muted).when(count > 0, (el) => el.child(icon("comment", 13)).child(String(count))))
       .child(part(HEADER_PARTS.stats).gap(6).text_size(12)
@@ -997,22 +1099,20 @@ export default class SnappyDiff extends View {
         .child("Viewed"));
     if (!pinned) return header;
     // The pinned copy sits outside the list, so it can have handlers of its own.
-    return header.id("pinned").on_click((e, cx) => {
-      const x = e.position.x; // only which part matters; measured from the main area's right edge
-      const fromRight = this.mainW - SCROLLBAR_W - (x - (this.mainLeft ?? 0));
-      if (fromRight < HEADER_PARTS.viewed) this.toggleViewed(f, cx);
-      else this.toggleCollapsed(f, cx);
-    }).on_mouse_down("left", (e) => { if (e.bounds) this.mainLeft = e.bounds.origin?.x ?? e.position.x - (e.local_position?.x ?? 0); });
+    return header.id("pinned").cursor_pointer().on_mouse_down("left", (e, cx) => {
+      cx.stop_propagation();
+      if (e.bounds) this.pressHeader(f, this.headerPart(e.bounds.x + e.bounds.width - e.position.x), cx);
+    });
   }
 
   renderComment(t, c) {
-    return h_flex().w_full().px(16).py(8).bg(alpha(t.foreground, "05")).font_family(theme().ui_font ?? "")
+    return h_flex().w_full().px(16).py(8).bg(alpha(t.foreground, "05"))
       .child(v_flex().flex_1().min_w(0).p(10).gap(4).rounded(8).border_1().border_color(t.border).bg(t.popover)
         .child(h_flex().gap(8).text_size(11.5).text_color(t.dim)
           .child(icon("comment", 12))
           .child(div().flex_1().child(c.start === c.end ? `Line ${c.end}` : `Lines ${c.start}–${c.end}`))
-          .child(div().w(50).text_color(t.muted).child("Edit"))
-          .child(div().w(50).text_color(t.muted).child("Delete")))
+          .child(div().w(46).flex().justify_end().text_color(t.muted).child("Edit"))
+          .child(div().w(46).flex().justify_end().text_color(t.muted).child("Delete")))
         .child(div().text_size(13).text_color(t.foreground).child(c.text)));
   }
 
@@ -1023,8 +1123,8 @@ export default class SnappyDiff extends View {
         .child(Input.new(this.commentInput).h(30).w_full().text_size(13).text_color(t.foreground))
         .child(h_flex().gap(8).items_center().text_size(11.5)
           .child(div().flex_1().text_color(t.dim).child(`${lines} · ↵ to save, esc to cancel`))
-          .child(div().w(70).text_color(t.muted).child("Cancel"))
-          .child(div().px(12).py(4).rounded(6).bg(t.solid).text_color(t.solid_foreground).child("Comment"))));
+          .child(div().w(70).flex().justify_end().text_color(t.muted).child("Cancel"))
+          .child(div().w(76).py(4).flex().justify_center().rounded(6).bg(t.solid).text_color(t.solid_foreground).child("Comment"))));
   }
 
   renderPalette(t) {
