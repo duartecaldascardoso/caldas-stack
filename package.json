@@ -1,7 +1,7 @@
 {
-  "name": "kanban-md",
-  "version": "0.1.0",
-  "description": "Plain-text kanban boards for Herdr, kept as markdown files.",
+  "name": "caldas-stack",
+  "version": "0.2.0",
+  "description": "My development environment: Herdr mods for a plain-text kanban board and a native diff viewer.",
   "private": true,
   "type": "module",
   "license": "MIT",
@@ -10,6 +10,6 @@
   },
   "scripts": {
     "test": "node --test",
-    "check": "node --check mods/kanban-md/main.js && node --check mods/kanban-md/board.js"
+    "check": "for f in */mods/*/*.js; do node --check \"$f\" || exit 1; done"
   }
 }

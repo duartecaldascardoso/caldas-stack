@@ -2,5 +2,5 @@
 node_modules/
 
 # written by herdr-app check
-mods/*/gpui-kit.d.ts
-mods/*/jsconfig.json
+**/mods/*/gpui-kit.d.ts
+**/mods/*/jsconfig.json
