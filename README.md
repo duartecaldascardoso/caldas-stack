@@ -28,7 +28,7 @@ Five columns: ideas, todo, wip, test, done. Every board is a markdown file in `~
 
 ## WIP
 - Launch post #42
-- Pricing page @feature/pricing
+- Pricing page issue #12 @feature/pricing
 
 ## Done
 - Pick a domain
@@ -37,8 +37,8 @@ Five columns: ideas, todo, wip, test, done. Every board is a markdown file in `~
 - **Project boards:** a board named after a git repository opens first inside it, and `p` creates one for the current project.
 - **Start work:** `s` makes a worktree on `feature/<card>` (in `~/.herdr/worktrees`, where Herdr nests it under the repository), opens a space there with your agent and the card as its first task, links the card to the branch and moves it to wip.
 - **Agents on cards:** a card shows the agent on its branch (working, blocked, ready, idle). While the board is open, an agent that finishes says the card is ready for review; the toast opens its diff.
-- **Links:** `#42` links a card to pull request 42 and `@branch` to a branch. The card shows the pull request's state (open, draft, merged, closed), its checks and its review.
-- **Cards follow their pull request:** opening it moves the card to test, merging it moves it to done.
+- **Links:** `#42` links a card to pull request or issue 42 (GitHub says which; `issue #34` and `PR #42` say it outright) and `@branch` to a branch. A card can have several. It shows a pull request's state (open, draft, merged, closed), checks and review, and an issue's state.
+- **Cards follow GitHub:** opening a pull request moves its card to test, merging it or completing the issue moves it to done.
 - **Follows your theme**, with a done/total progress bar per board.
 
 | Key | Action |
@@ -47,9 +47,9 @@ Five columns: ideas, todo, wip, test, done. Every board is a markdown file in `~
 | `⇧` + move | Move the card |
 | `n` / `e` / `d` | New, edit, delete card |
 | `@` | Link the card to its branch's pull request, or the branch |
-| `g` | Open the linked pull request or branch in snappy-diff |
+| `g` | Open the card's pull request or branch in snappy-diff, or its issue in the browser |
 | `s` | Start work: a worktree, a branch and an agent for the card (asks first) |
-| `o` | Push the card's branch and open a pull request titled like the card (asks first) |
+| `o` | Push the card's branch and open a pull request titled like the card, closing its issue (asks first) |
 | `⌘Z` / `⌘⇧Z` | Undo / redo |
 | `[` `]` | Switch board |
 | `b` / `p` / `⇧D` | New board, board for this project, delete board |
@@ -62,7 +62,7 @@ Agents and scripts change boards through `kanban`, which keeps the file in the b
 kanban                          # the board, cards numbered
 kanban add todo Pricing page
 kanban move pricing wip         # a card by number, or a unique part of its text
-kanban link 3 #42               # or @feature/pricing
+kanban link 3 #42               # or "issue #34", or @feature/pricing
 kanban done 3
 ```
 

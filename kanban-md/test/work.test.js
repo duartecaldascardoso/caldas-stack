@@ -52,6 +52,15 @@ test("wrapText breaks at spaces, and inside a word only when it must", async () 
   assert.deepEqual(wrapText("Viewer memory on huge reports", 14), ["Viewer memory", "on huge", "reports"]);
   assert.deepEqual(wrapText("abcdefghij", 4), ["abcd", "efgh", "ij"]);
   assert.deepEqual(wrapText("short", 20), ["short"]);
-  assert.equal(cardHeight(1, false), 2 + 20 + 18 + 6);
-  assert.equal(cardHeight(2, true), 2 + 20 + 36 + 8 + 22 + 6);
+  assert.equal(cardHeight(1), 2 + 20 + 18 + 6);
+  assert.equal(cardHeight(2, 1), 2 + 20 + 36 + 8 + 22 + 6);
+  assert.equal(cardHeight(1, 2), 2 + 20 + 18 + 8 + 44 + 4 + 6);
+});
+
+test("chipRows wraps chips that don't fit", async () => {
+  const { chipRows } = await import("../mods/kanban-md/cards.js");
+  assert.equal(chipRows([], 200), 0);
+  assert.equal(chipRows([80, 80], 200), 1);
+  assert.equal(chipRows([80, 80, 80], 200), 2);
+  assert.equal(chipRows([300], 200), 1); // a chip wider than the card still takes one row
 });

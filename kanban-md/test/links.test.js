@@ -1,14 +1,14 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { prStatus, columnFor, describe, numberFromUrl } from "../mods/kanban-md/links.js";
+import { prStatus, issueStatus, columnFor, describe, numberFromUrl } from "../mods/kanban-md/links.js";
 
 test("prStatus reads state, checks and review from gh", () => {
   assert.deepEqual(prStatus({ state: "OPEN", isDraft: false, reviewDecision: "APPROVED", statusCheckRollup: [{ conclusion: "SUCCESS" }, { state: "SUCCESS" }] }),
-    { state: "open", checks: "passing", review: "approved", branch: null });
+    { kind: "pr", state: "open", checks: "passing", review: "approved", branch: null });
   assert.deepEqual(prStatus({ state: "OPEN", isDraft: true, reviewDecision: "", statusCheckRollup: [{ status: "IN_PROGRESS", conclusion: "" }] }),
-    { state: "draft", checks: "pending", review: null, branch: null });
+    { kind: "pr", state: "draft", checks: "pending", review: null, branch: null });
   assert.deepEqual(prStatus({ state: "MERGED", statusCheckRollup: [{ conclusion: "SUCCESS" }, { conclusion: "FAILURE" }], reviewDecision: "CHANGES_REQUESTED" }),
-    { state: "merged", checks: "failing", review: "changes", branch: null });
+    { kind: "pr", state: "merged", checks: "failing", review: "changes", branch: null });
   assert.equal(prStatus({ state: "OPEN", headRefName: "feature/x" }).branch, "feature/x");
   assert.equal(prStatus({ state: "CLOSED", statusCheckRollup: [] }).checks, null);
 });
@@ -29,4 +29,17 @@ test("describe and numberFromUrl", () => {
   assert.equal(describe(7, { state: "draft", checks: null, review: null }), "#7 draft");
   assert.equal(numberFromUrl("https://github.com/o/r/pull/12\n"), 12);
   assert.equal(numberFromUrl("nothing"), null);
+});
+
+test("issues: their state, and done once completed", () => {
+  const open = issueStatus({ state: "OPEN", url: "u" });
+  const done = issueStatus({ state: "CLOSED", stateReason: "COMPLETED" });
+  const dropped = issueStatus({ state: "CLOSED", stateReason: "NOT_PLANNED" });
+  assert.deepEqual(open, { kind: "issue", state: "open", completed: false, url: "u" });
+  assert.equal(columnFor(open, 1), null);
+  assert.equal(columnFor(done, 1), 4);
+  assert.equal(columnFor(done, 4), null);
+  assert.equal(columnFor(dropped, 1), null);
+  assert.equal(describe(34, open), "issue #34 open");
+  assert.equal(describe(34, dropped), "issue #34 closed, not planned");
 });

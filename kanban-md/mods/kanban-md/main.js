@@ -4,11 +4,11 @@ import { v_flex, h_flex, InputState, Input, Scrollbar, v_virtual_list, VirtualLi
 import { home, props, openOverlay, closeOverlay, readTextFile, writeTextFile, exec, focused, notify, run, agents, panes, knownAgents, settings, theme } from "herdr";
 import {
   COLUMNS, emptyLanes, parse, serialize, boardName,
-  addCard, editCard, removeCard, shiftCard, reorderCard, cardLink, withoutLink,
+  addCard, editCard, removeCard, shiftCard, reorderCard, cardLinks, withoutLinks, withLink,
 } from "./board.js";
-import { prStatus, columnFor, describe, numberFromUrl } from "./links.js";
+import { prStatus, issueStatus, columnFor, describe, numberFromUrl } from "./links.js";
 import { branchFor, worktreePath, cardBranch, agentsByBranch, finished, checkoutOf } from "./work.js";
-import { LINE_H, PAD_Y, CHIPS_H, CHIPS_GAP, CARD_GAP, INPUT_H, wrapText, cardHeight } from "./cards.js";
+import { LINE_H, PAD_Y, CHIPS_H, CHIPS_GAP, CHIPS_ROW_GAP, CHIP_GAP, CARD_GAP, INPUT_H, wrapText, cardHeight, chipLayout } from "./cards.js";
 
 const TEXT_SIZE = 13;
 // Card text sits inside: the column's border, the list's 8px sides, the card's border and 12px sides.
@@ -356,22 +356,45 @@ export default class Kanban extends View {
     return null;
   }
 
+  // A card's links, each number with what GitHub said about it: { refs, branch, pr, issue }.
+  linksOf(card) {
+    const links = card == null ? null : cardLinks(card);
+    if (!links) return null;
+    const repo = this.repoFor(this.board);
+    const refs = links.refs.map((r) => ({ ...r, status: repo ? this.statuses.get(`${repo}#${r.n}`) ?? null : null }));
+    const is = (kind) => (r) => r.kind === kind || (r.kind === null && r.status?.kind === kind);
+    return { ...links, refs, pr: refs.find(is("pr")) ?? null, issue: refs.find(is("issue")) ?? null };
+  }
+
+  // The branch a card's work happens on: its own, or its pull request's head.
+  branchOf(card) {
+    const links = this.linksOf(card);
+    return cardBranch(links, links?.pr?.status);
+  }
+
+  // g: the card's pull request or branch in snappy-diff; an issue alone opens in the browser.
   openDiff(card) {
-    const link = card && cardLink(card);
-    if (!link) return;
+    const links = this.linksOf(card);
+    if (!links) return;
     const repo = this.repoFor(this.board);
     if (!repo) {
       notify({ title: "No repository for this board", body: "Open the board from a terminal inside the project once.", level: "warning" });
       return;
     }
+    const branch = this.branchOf(card);
+    if (!links.pr && !branch && links.issue) {
+      exec("gh", ["issue", "view", String(links.issue.n), "--web"], { cwd: repo }).catch(() => {});
+      return;
+    }
+    if (!links.pr && !branch) return;
     openOverlay({
       mod: "snappy-diff", kind: "dialog", modal: true, width: 0.96, height: 0.92,
-      props: link.pr ? { repo, pr: link.pr } : { repo, head: link.branch },
+      props: links.pr ? { repo, pr: links.pr.n } : { repo, head: branch },
     });
   }
 
-  // Links the selected card to the branch its board's repository is on: its pull request
-  // when it has one, the branch itself otherwise.
+  // @: links the selected card to the branch its board's repository is on, and to that
+  // branch's pull request when it has one.
   linkBranch(cx) {
     const { lanes, col } = this;
     const row = this.rows[col];
@@ -381,30 +404,30 @@ export default class Kanban extends View {
     cx.spawn(async (cx) => {
       const branch = (await exec("git", ["-C", repo, "rev-parse", "--abbrev-ref", "HEAD"])).stdout.trim();
       const pr = await exec("gh", ["pr", "view", "--json", "number", "-q", ".number"], { cwd: repo }).catch(() => null);
-      const token = pr?.code === 0 && pr.stdout.trim() ? `#${pr.stdout.trim()}` : `@${branch}`;
-      const old = cardLink(card)?.token;
-      this.apply(editCard(this.lanes, col, row, old ? card.replace(old, token) : `${card} ${token}`), cx);
+      let text = withLink(card, `@${branch}`);
+      if (pr?.code === 0 && pr.stdout.trim()) text = withLink(text, `#${pr.stdout.trim()}`);
+      this.apply(editCard(this.lanes, col, row, text), cx);
     });
   }
 
-  // Pull requests: their state on the card, cards that follow it, and opening one.
+  // GitHub: what each number on the board is, cards that follow it, and opening pull requests.
 
-  statusOf(card) {
-    const link = card && cardLink(card);
-    const repo = this.repoFor(this.board);
-    return link?.pr && repo ? this.statuses.get(`${repo}#${link.pr}`) ?? null : null;
-  }
-
-  // Asks gh about every pull request on the open board, then moves the cards that should
-  // follow: merged to done, open to test.
+  // Asks gh about every number on the open board: a pull request, else an issue. Then moves the
+  // cards that should follow: merged or completed to done, an open pull request to test.
   async syncStatuses(cx) {
     const repo = await this.findRepo(this.board);
     if (!repo) return;
-    const numbers = [...new Set(this.lanes.flat().map((card) => cardLink(card)?.pr).filter(Boolean))];
-    await Promise.all(numbers.map(async (n) => {
-      const result = await exec("gh", ["pr", "view", String(n), "--json", "state,isDraft,reviewDecision,statusCheckRollup,headRefName"], { cwd: repo }).catch(() => null);
-      if (result?.code !== 0) return;
-      try { this.statuses.set(`${repo}#${n}`, prStatus(JSON.parse(result.stdout))); } catch { /* not JSON: skip it */ }
+    const refs = new Map();
+    for (const card of this.lanes.flat()) for (const r of cardLinks(card)?.refs ?? []) if (!refs.has(r.n) || r.kind) refs.set(r.n, r.kind);
+    const gh = async (args, parse) => {
+      const result = await exec("gh", args, { cwd: repo }).catch(() => null);
+      if (result?.code !== 0) return null;
+      try { return parse(JSON.parse(result.stdout)); } catch { return null; }
+    };
+    await Promise.all([...refs].map(async ([n, kind]) => {
+      const pr = kind === "issue" ? null : await gh(["pr", "view", String(n), "--json", "state,isDraft,reviewDecision,statusCheckRollup,headRefName"], prStatus);
+      const status = pr ?? (kind === "pr" ? null : await gh(["issue", "view", String(n), "--json", "state,stateReason,url"], issueStatus));
+      if (status) this.statuses.set(`${repo}#${n}`, status);
     }));
     this.followStatuses(cx);
     cx.notify();
@@ -415,12 +438,13 @@ export default class Kanban extends View {
     const lanes = this.lanes.map((lane) => [...lane]);
     const columns = { test: COLUMNS.indexOf("Test"), done: COLUMNS.indexOf("Done") };
     this.lanes.forEach((lane, col) => lane.forEach((card) => {
-      const status = this.statusOf(card);
-      const to = status && columnFor(status, col, columns);
+      const links = this.linksOf(card);
+      const ref = links?.pr ?? links?.issue;
+      const to = ref?.status && columnFor(ref.status, col, columns);
       if (to == null) return;
       lanes[col].splice(lanes[col].indexOf(card), 1);
       lanes[to].push(card);
-      moves.push(`#${cardLink(card).pr} → ${COLUMNS[to].toLowerCase()}`);
+      moves.push(`#${ref.n} → ${COLUMNS[to].toLowerCase()}`);
     }));
     if (!moves.length) return;
     const history = (this.history[this.board] ??= { undo: [], redo: [] });
@@ -433,40 +457,40 @@ export default class Kanban extends View {
   }
 
   // o: push the card's branch (or the current one) and open a pull request titled like the
-  // card. Asks first, since both are seen by others.
+  // card, closing its issue if it has one. Asks first, since both are seen by others.
   askPullRequest(cx) {
     const { col } = this;
     const row = this.rows[col];
     const card = this.lanes[col][row];
     if (card == null) return;
-    const link = cardLink(card);
-    if (link?.pr) { notify({ title: `Already linked to #${link.pr}`, level: "info", timeout: 2500 }); return; }
+    const links = this.linksOf(card);
+    if (links?.pr) { notify({ title: `Already linked to #${links.pr.n}`, level: "info", timeout: 2500 }); return; }
     const repo = this.repoFor(this.board);
     if (!repo) return;
     cx.spawn(async (cx) => {
-      const branch = link?.branch ?? (await exec("git", ["-C", repo, "rev-parse", "--abbrev-ref", "HEAD"])).stdout.trim();
+      const branch = this.branchOf(card) ?? (await exec("git", ["-C", repo, "rev-parse", "--abbrev-ref", "HEAD"])).stdout.trim();
       if (!branch || branch === "HEAD" || ["main", "master"].includes(branch)) {
-        notify({ title: "No branch to open a pull request from", body: "Link the card to a branch, or switch to one.", level: "warning" });
+        notify({ title: "No branch to open a pull request from", body: "Start work on the card, link it to a branch, or switch to one.", level: "warning" });
         return;
       }
-      this.confirmingPr = { col, row, branch, repo, title: withoutLink(card) };
+      this.confirmingPr = { col, row, branch, repo, title: withoutLinks(card), issue: links?.issue?.n ?? null };
       cx.notify();
     });
   }
 
-  openPullRequest({ col, row, branch, repo, title }, cx) {
+  openPullRequest({ col, row, branch, repo, title, issue }, cx) {
     cx.spawn(async (cx) => {
       const lastLine = (text) => text.trim().split("\n").pop();
       const push = await exec("git", ["-C", repo, "push", "-u", "origin", branch]);
       if (push.code !== 0) { notify({ title: `Couldn't push ${branch}`, body: lastLine(push.stderr), level: "error" }); return; }
-      const create = await exec("gh", ["pr", "create", "--head", branch, "--title", title, "--body", ""], { cwd: repo });
+      const body = issue ? `Closes #${issue}` : "";
+      const create = await exec("gh", ["pr", "create", "--head", branch, "--title", title, "--body", body], { cwd: repo });
       const number = create.code === 0 && numberFromUrl(create.stdout);
       if (!number) { notify({ title: "Couldn't open the pull request", body: lastLine(create.stderr), level: "error" }); return; }
       notify({ title: `Opened pull request #${number}`, body: title, level: "success", timeout: 4000 });
       const card = this.lanes[col][row];
-      if (card == null || withoutLink(card) !== title) return; // the board moved on; the pull request still exists
-      const old = cardLink(card)?.token;
-      this.apply(editCard(this.lanes, col, row, old ? card.replace(old, `#${number}`) : `${card} #${number}`), cx);
+      if (card == null || withoutLinks(card) !== title) return; // the board moved on; the pull request still exists
+      this.apply(editCard(this.lanes, col, row, withLink(card, `#${number}`)), cx);
       await this.syncStatuses(cx);
     });
   }
@@ -474,7 +498,7 @@ export default class Kanban extends View {
   // Working on cards: start an agent on a card, and follow the agents working on them.
 
   // s: a worktree on a branch named after the card, a space there with an agent that gets the
-  // card as its task, the card linked to the branch and moved to wip. Asks first.
+  // card (and its issue) as its task, the card linked to the branch and moved to wip. Asks first.
   askStartWork(cx) {
     const { col } = this;
     const row = this.rows[col];
@@ -485,20 +509,20 @@ export default class Kanban extends View {
       notify({ title: "No repository for this board", body: "Open the board from a terminal inside the project once.", level: "warning" });
       return;
     }
-    const link = cardLink(card);
-    const branch = cardBranch(link, this.statusOf(card)) ?? branchFor(withoutLink(card));
+    const branch = this.branchOf(card) ?? branchFor(withoutLinks(card));
+    const issue = this.linksOf(card)?.issue?.n ?? null;
     cx.spawn(async (cx) => {
       const agent = (await knownAgents().catch(() => [])).find((a) => a.installed);
       if (!agent) {
         notify({ title: "No agent to start", body: "Install one Herdr knows, like Claude Code or Codex.", level: "warning" });
         return;
       }
-      this.confirmingStart = { col, row, card, branch, repo, agent };
+      this.confirmingStart = { col, row, card, branch, repo, agent, issue };
       cx.notify();
     });
   }
 
-  startWork({ col, row, card, branch, repo, agent }, cx) {
+  startWork({ col, row, card, branch, repo, agent, issue }, cx) {
     cx.spawn(async (cx) => {
       const git = (args, cwd = repo) => exec("git", ["-C", cwd, ...args]);
       const path = worktreePath(home(), repo, branch);
@@ -514,11 +538,10 @@ export default class Kanban extends View {
         }
         folder = path;
       }
-      const title = withoutLink(card);
-      run("space.new", { name: title.slice(0, 40), folder, argv: agent.run, task: title });
+      const title = withoutLinks(card);
+      run("space.new", { name: title.slice(0, 40), folder, argv: agent.run, task: issue ? `${title} (GitHub issue #${issue})` : title });
       const wip = COLUMNS.indexOf("WIP");
-      const old = cardLink(card)?.token;
-      const linked = old ? card : `${card} @${branch}`;
+      const linked = cardLinks(card)?.branch ? card : withLink(card, `@${branch}`);
       const lanes = this.lanes.map((lane) => [...lane]);
       const at = lanes[col].indexOf(card);
       if (at < 0) return; // the board moved on; the work started anyway
@@ -531,7 +554,7 @@ export default class Kanban extends View {
 
   // Agents by branch, read live: render runs again whenever Herdr's agents change.
   agentOf(card) {
-    const branch = cardBranch(cardLink(card), this.statusOf(card));
+    const branch = this.branchOf(card);
     return branch ? this.agentMap?.get(branch) ?? null : null;
   }
 
@@ -541,13 +564,13 @@ export default class Kanban extends View {
     const now = agentsByBranch(agents(), panes());
     const repo = this.repoFor(this.board);
     for (const branch of finished(this.agentsBefore, now)) {
-      const card = this.lanes.flat().find((c) => cardBranch(cardLink(c), this.statusOf(c)) === branch);
+      const card = this.lanes.flat().find((c) => this.branchOf(c) === branch);
       if (!card || !repo) continue;
-      const link = cardLink(card);
+      const pr = this.linksOf(card)?.pr;
       notify({
-        title: `${withoutLink(card)} is ready for review`, body: `${now.get(branch).name ?? "The agent"} finished on ${branch}`,
+        title: `${withoutLinks(card)} is ready for review`, body: `${now.get(branch).name ?? "The agent"} finished on ${branch}`,
         level: "success", timeout: 8000,
-        action: { name: "tab.new", args: { name: withoutLink(card).slice(0, 30), mod: "snappy-diff", props: link?.pr ? { repo, pr: link.pr } : { repo, head: branch } } },
+        action: { name: "tab.new", args: { name: withoutLinks(card).slice(0, 30), mod: "snappy-diff", props: pr ? { repo, pr: pr.n } : { repo, head: branch } } },
       });
     }
     this.agentsBefore = now;
@@ -628,7 +651,8 @@ export default class Kanban extends View {
     const sizes = items.map((item) => {
       const editingThis = this.editing?.kind === "card" && this.editing.col === c && this.editing.row === item.r;
       if (item.input || editingThis) return INPUT_H + CARD_GAP;
-      return cardHeight(wrapText(withoutLink(item.text), this.cardCols(this.agentOf(item.text))).length, Boolean(cardLink(item.text)));
+      const lines = wrapText(withoutLinks(item.text), this.cardCols(this.agentOf(item.text))).length;
+      return cardHeight(lines, chipLayout(this.chips(theme(), item.text, false).map((chip) => chip.width), this.chipWidth()).length);
     });
     return v_flex().id(`col-${c}`).flex_1().min_w(0).h_full().rounded(10).border_1()
       .border_color(active ? alpha(t.accent, "66") : t.border).bg(t.background)
@@ -665,35 +689,64 @@ export default class Kanban extends View {
     if (editing?.kind === "card" && editing.col === c && editing.row === r) return this.renderInput(t, `edit-${c}-${r}`);
     const selected = !editing && c === this.col && r === this.rows[c];
     const done = c === COLUMNS.length - 1;
-    const link = cardLink(text);
     const agent = this.agentOf(text);
     return v_flex().relative().px(12).py(PAD_Y).gap(CHIPS_GAP).rounded(8).border_1().cursor_pointer()
       .border_color(selected ? t.accent : t.border).bg(selected ? t.selected : t.raised)
       .hover((s) => s.border_color(selected ? t.accent : t.input))
-      .child(v_flex().text_color(done ? t.muted : t.foreground).children(wrapText(withoutLink(text), this.cardCols(agent)).map((line) =>
+      .child(v_flex().text_color(done ? t.muted : t.foreground).children(wrapText(withoutLinks(text), this.cardCols(agent)).map((line) =>
         h_flex().h(LINE_H).items_center().whitespace_nowrap().child(line))))
-      .when(Boolean(link), (el) => el.child(h_flex().h(CHIPS_H).items_center().child(this.renderLink(t, link, this.statusOf(text), done))))
+      .when(Boolean(cardLinks(text)), (el) => el.child(this.renderChips(t, text, done)))
       // The agent's status sits at the end of the first line, where it can't be pushed out.
       .when(Boolean(agent), (el) => el.child(h_flex().absolute().top(PAD_Y + 1).right(10).h(LINE_H).items_center()
         .child(this.agentMark(t, agent))));
   }
 
-  // The card's pull request as a chip: a dot for its state, the number, then checks and review.
-  renderLink(t, link, status, done) {
-    const chip = h_flex().px(7).py(2).gap(6).items_center().flex_none().rounded(5).bg(t.background).border_1().border_color(t.border).text_size(11);
-    if (link.branch) return chip.text_color(done ? t.dim : t.muted).child(`⎇ ${link.branch}`);
-    const state = { open: t.ansi2, draft: t.dim, merged: t.ansi5, closed: t.ansi1 }[status?.state] ?? t.dim;
-    const checks = { passing: ["✓", t.ansi2], failing: ["✗", t.ansi1], pending: ["•", t.ansi3] }[status?.checks];
-    const review = { approved: ["approved", t.ansi2], changes: ["changes", t.ansi1] }[status?.review];
-    return chip
-      .child(div().size(6).rounded(3).bg(state))
-      .child(div().text_color(done ? t.muted : t.foreground).child(`#${link.pr}`))
-      .when(Boolean(status), (el) => el.child(div().text_color(t.dim).child(status.state)))
-      .when(Boolean(checks), (el) => el.child(div().text_color(checks[1]).child(checks[0])))
-      .when(Boolean(review), (el) => el.child(div().text_color(review[1]).child(review[0])));
+  // The room chips have in a card, and an 11px character's width.
+  chipWidth() {
+    return Math.max(80, this.columnW - CARD_INSET);
   }
 
-  // The agent on the card's branch: a dot in Herdr's colour for its status, and the status.
+  // A card's links as chips, each { width, parts }: a mark (a dot for a pull request, a ring for
+  // an issue) and pieces of text. Widths are worked out the way the text's are, so the card's
+  // height is known before it is drawn.
+  chips(t, card, done) {
+    const links = this.linksOf(card);
+    if (!links) return [];
+    const ch = (this.charW * 11) / 13;
+    const chip = (mark, texts) => ({
+      mark, texts,
+      width: 16 + (mark ? 12 : 0) + texts.reduce((n, [text]) => n + text.length * ch, 0) + 6 * Math.max(0, texts.length - 1),
+    });
+    const out = [];
+    for (const ref of links.refs) {
+      const st = ref.status;
+      if (st?.kind === "issue" || (ref.kind === "issue" && !st)) {
+        const color = !st ? t.dim : st.state === "open" ? t.ansi2 : st.completed ? t.ansi5 : t.dim;
+        out.push(chip({ ring: true, color }, [[`#${ref.n}`, done ? t.muted : t.foreground], ["issue", t.dim], ...(st ? [[st.state === "closed" && !st.completed ? "not planned" : st.state, t.dim]] : [])]));
+        continue;
+      }
+      const color = { open: t.ansi2, draft: t.dim, merged: t.ansi5, closed: t.ansi1 }[st?.state] ?? t.dim;
+      const checks = { passing: ["✓", t.ansi2], failing: ["✗", t.ansi1], pending: ["•", t.ansi3] }[st?.checks];
+      const review = { approved: ["approved", t.ansi2], changes: ["changes", t.ansi1] }[st?.review];
+      out.push(chip({ ring: false, color }, [[`#${ref.n}`, done ? t.muted : t.foreground], ...(st ? [[st.state, t.dim]] : []), ...(checks ? [checks] : []), ...(review ? [review] : [])]));
+    }
+    if (links.branch) out.push(chip(null, [[`⎇ ${links.branch}`, done ? t.dim : t.muted]]));
+    return out;
+  }
+
+  renderChips(t, card, done) {
+    const chips = this.chips(t, card, done);
+    const available = this.chipWidth();
+    const draw = ({ mark, texts }) => h_flex().h(CHIPS_H).max_w(available).px(7).gap(6).items_center().flex_none().rounded(5)
+      .bg(t.background).border_1().border_color(t.border).text_size(11)
+      .when(Boolean(mark), (el) => el.child(mark.ring
+        ? div().size(7).flex_none().rounded(4).border(1.5).border_color(mark.color)
+        : div().size(6).flex_none().rounded(3).bg(mark.color)))
+      .children(texts.map(([text, color]) => div().min_w(0).truncate().text_color(color).child(text)));
+    return v_flex().gap(CHIPS_ROW_GAP).children(chipLayout(chips.map((c) => c.width), available).map((row) =>
+      h_flex().h(CHIPS_H).gap(CHIP_GAP).items_center().children(row.map((i) => draw(chips[i])))));
+  }
+
   // Herdr's own marks, as its agents sidebar draws them: a turning ring while working, "Needs you"
   // when blocked, a filled dot when done, a hollow ring when idle.
   agentMark(t, agent) {
@@ -728,19 +781,25 @@ export default class Kanban extends View {
     }
     if (this.editing) return line.child(this.keys(t, [["↵", "save"], ["esc", "cancel"]]));
     const card = this.lanes[this.col][this.rows[this.col]];
-    const link = card != null ? cardLink(card) : null;
-    const status = link?.pr && this.statusOf(card);
+    const links = card != null ? this.linksOf(card) : null;
+    const ref = links?.pr ?? links?.issue;
+    const status = ref?.status;
     const repo = this.repoFor(this.board);
-    const linked = card == null ? []
-      : link ? [["g", "open diff"], ...(repo && !this.agentOf(card) ? [["s", "start work"]] : []), ...(link.branch ? [["o", "open pull request"]] : [])]
-      : repo ? [["s", "start work"], ["@", "link branch"], ["o", "open pull request"]] : [];
+    const branch = card != null ? this.branchOf(card) : null;
+    const linked = card == null || !repo ? []
+      : [
+        ...(links?.pr || branch ? [["g", "open diff"]] : links?.issue ? [["g", "open issue"]] : []),
+        ...(!this.agentOf(card) ? [["s", "start work"]] : []),
+        ...(!branch ? [["@", "link branch"]] : []),
+        ...(!links?.pr ? [["o", "open pull request"]] : []),
+      ];
     const offer = this.project && !this.boards.includes(this.project) ? [["p", `board for ${this.project}`]] : [];
     const agent = card != null ? this.agentOf(card) : null;
     const doing = { working: "is working", blocked: "needs you", done: "is ready for review", idle: "is idle" };
     return line
       .when(Boolean(agent), (el) => el.child(h_flex().gap(6).items_center().text_color(t.muted)
         .child(this.agentMark(t, agent)).child(`${agent.name ?? "Agent"} ${doing[agent.status] ?? agent.status}`)))
-      .when(Boolean(status), (el) => el.child(div().text_color(t.muted).child(describe(link.pr, status))))
+      .when(Boolean(status), (el) => el.child(div().text_color(t.muted).child(describe(ref.n, status))))
       .child(this.keys(t, [...offer, ...linked, ...HINTS]));
   }
 

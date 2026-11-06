@@ -5,7 +5,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync, readdirSync, readFileSync, renameSync, writeFileSync, mkdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, join } from "node:path";
-import { COLUMNS, parse, serialize, addCard, editCard, removeCard, cardLink, withoutLink } from "../mods/kanban-md/board.js";
+import { COLUMNS, parse, serialize, addCard, editCard, removeCard, withLink } from "../mods/kanban-md/board.js";
 
 const DIR = process.env.KANBAN_DIR ?? join(homedir(), "kanban");
 
@@ -17,7 +17,7 @@ const USAGE = `kanban: plain-text kanban boards in ${DIR.replace(homedir(), "~")
   kanban move <card> <column>    move a card (by number, or a unique part of its text)
   kanban done <card>             move a card to done
   kanban edit <card> <text>      change a card's text
-  kanban link <card> <#n|@branch> link a card to a pull request or a branch
+  kanban link <card> <link>      link a card: #42 (pull request or issue), issue #34, @branch
   kanban rm <card>               delete a card
 
   -b, --board <name>   the board (default: the git repository you are in, else main)
@@ -132,10 +132,10 @@ export function main(argv) {
     }
     case "link": {
       const card = findCard(lanes, rest[0]);
-      const token = rest[1] ?? "";
-      if (!/^(#\d+|@[\w./-]+)$/.test(token)) fail(`link to "#<number>" or "@<branch>", not "${token}"`);
-      const old = cardLink(card.text)?.token;
-      const text = old ? card.text.replace(old, token) : `${withoutLink(card.text)} ${token}`;
+      const token = rest.slice(1).join(" ");
+      if (!/^((issue|pr) )?#\d+$|^@[\w./-]+$/i.test(token)) fail(`link to "#<number>", "issue #<number>" or "@<branch>", not "${token}"`);
+      const text = withLink(card.text, token);
+      if (text === card.text) return `already linked: ${text}`;
       return change(editCard(lanes, card.col, card.row, text), `linked: ${text}`);
     }
     case "rm": {

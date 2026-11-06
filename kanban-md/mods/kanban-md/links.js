@@ -15,12 +15,21 @@ export function prStatus(pr) {
     : results.every((r) => PASSED.has(r)) ? "passing"
     : "pending";
   const review = pr.reviewDecision === "APPROVED" ? "approved" : pr.reviewDecision === "CHANGES_REQUESTED" ? "changes" : null;
-  return { state, checks, review, branch: pr.headRefName ?? null };
+  return { kind: "pr", state, checks, review, branch: pr.headRefName ?? null };
+}
+
+// From `gh issue view --json state,stateReason,url`: { kind: "issue", state: "open" | "closed",
+// completed, url }. An issue closed as not planned isn't completed.
+export function issueStatus(issue) {
+  const closed = issue.state === "CLOSED";
+  return { kind: "issue", state: closed ? "closed" : "open", completed: closed && issue.stateReason !== "NOT_PLANNED", url: issue.url ?? null };
 }
 
 // The column a card belongs in now, or null to leave it: a merged pull request is done, and an
-// open one is in test once it has left ideas, todo and wip. Column indexes follow COLUMNS.
+// open one is in test once it has left ideas, todo and wip; a completed issue is done. Column
+// indexes follow COLUMNS.
 export function columnFor(status, col, { test = 3, done = 4 } = {}) {
+  if (status.kind === "issue") return status.completed && col !== done ? done : null;
   if (status.state === "merged") return col === done ? null : done;
   if (status.state === "open" && col < test) return test;
   return null;
@@ -28,6 +37,7 @@ export function columnFor(status, col, { test = 3, done = 4 } = {}) {
 
 // "#42 open · checks passing · approved", for the hint line.
 export function describe(number, status) {
+  if (status.kind === "issue") return `issue #${number} ${status.completed === false && status.state === "closed" ? "closed, not planned" : status.state}`;
   const parts = [`#${number} ${status.state}`];
   if (status.checks) parts.push(`checks ${status.checks}`);
   if (status.review) parts.push(status.review === "approved" ? "approved" : "changes requested");
