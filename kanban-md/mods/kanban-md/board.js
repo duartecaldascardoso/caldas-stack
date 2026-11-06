@@ -89,8 +89,10 @@ export function cardLink(text) {
   return null;
 }
 
-// The card's text without its link, for showing the link apart.
+// The card's text without its link, for showing the link apart. Only a link at the end comes
+// off (where "@" puts it); one inside a sentence ("PR #47 needs a test") stays readable.
 export function withoutLink(text) {
   const link = cardLink(text);
-  return link ? text.replace(link.token, "").replace(/\s{2,}/g, " ").trim() : text;
+  const trimmed = text.trimEnd();
+  return link && trimmed.endsWith(link.token) ? trimmed.slice(0, -link.token.length).trimEnd() : text;
 }

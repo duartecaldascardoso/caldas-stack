@@ -1,0 +1,38 @@
+// A linked pull request's state, as the card shows it, and where that puts the card. Pure.
+
+const FAILED = new Set(["FAILURE", "ERROR", "CANCELLED", "TIMED_OUT", "ACTION_REQUIRED", "STARTUP_FAILURE"]);
+const PASSED = new Set(["SUCCESS", "NEUTRAL", "SKIPPED"]);
+
+// From `gh pr view --json state,isDraft,reviewDecision,statusCheckRollup`:
+// { state: "open" | "draft" | "merged" | "closed", checks: "passing" | "failing" | "pending" | null,
+//   review: "approved" | "changes" | null }.
+export function prStatus(pr) {
+  const state = pr.state === "MERGED" ? "merged" : pr.state === "CLOSED" ? "closed" : pr.isDraft ? "draft" : "open";
+  // Check runs report a conclusion once completed; commit statuses report a state.
+  const results = (pr.statusCheckRollup ?? []).map((c) => c.conclusion || c.state || (c.status === "COMPLETED" ? "SUCCESS" : "PENDING"));
+  const checks = !results.length ? null
+    : results.some((r) => FAILED.has(r)) ? "failing"
+    : results.every((r) => PASSED.has(r)) ? "passing"
+    : "pending";
+  const review = pr.reviewDecision === "APPROVED" ? "approved" : pr.reviewDecision === "CHANGES_REQUESTED" ? "changes" : null;
+  return { state, checks, review };
+}
+
+// The column a card belongs in now, or null to leave it: a merged pull request is done, and an
+// open one is in test once it has left ideas, todo and wip. Column indexes follow COLUMNS.
+export function columnFor(status, col, { test = 3, done = 4 } = {}) {
+  if (status.state === "merged") return col === done ? null : done;
+  if (status.state === "open" && col < test) return test;
+  return null;
+}
+
+// "#42 open · checks passing · approved", for the hint line.
+export function describe(number, status) {
+  const parts = [`#${number} ${status.state}`];
+  if (status.checks) parts.push(`checks ${status.checks}`);
+  if (status.review) parts.push(status.review === "approved" ? "approved" : "changes requested");
+  return parts.join(" · ");
+}
+
+// The number at the end of the URL `gh pr create` prints.
+export const numberFromUrl = (url) => Number(url.trim().match(/\/pull\/(\d+)\s*$/)?.[1]) || null;

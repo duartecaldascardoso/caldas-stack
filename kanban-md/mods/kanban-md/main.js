@@ -6,12 +6,14 @@ import {
   COLUMNS, emptyLanes, parse, serialize, boardName,
   addCard, editCard, removeCard, shiftCard, reorderCard, cardLink, withoutLink,
 } from "./board.js";
+import { prStatus, columnFor, describe, numberFromUrl } from "./links.js";
 
 const DIR = `${home()}/kanban`;
 const TRASH = `${DIR}/.trash`;
 const REPOS = `${DIR}/.repos.json`; // board name -> repository folder, learnt from project boards
 const DEFAULT_BOARD = "main";
 const POLL_MS = 3000; // picks up edits made to the files elsewhere
+const STATUS_MS = 60000; // linked pull requests, through gh
 const HISTORY_LIMIT = 200;
 
 const KEYS = {
@@ -23,7 +25,7 @@ const KEYS = {
   "cmd-z": "undo", "cmd-shift-z": "redo",
   "[": "prev-board", "shift-tab": "prev-board", "]": "next-board", "tab": "next-board",
   "b": "new-board", "p": "project-board", "shift-d": "delete-board", "escape": "close",
-  "g": "open-diff", "shift-2": "link", "@": "link",
+  "g": "open-diff", "shift-2": "link", "@": "link", "o": "open-pr",
   "1": "column-1", "2": "column-2", "3": "column-3", "4": "column-4", "5": "column-5",
 };
 
@@ -53,6 +55,8 @@ export default class Kanban extends View {
     this.history = {}; // board -> { undo: [lanes], redo: [lanes] }
     this.editing = null; // { kind: "card", col, row } (row null: a new card) or { kind: "board" }
     this.confirmingDelete = false;
+    this.confirmingPr = null; // { col, row, branch, repo, title } waiting for y
+    this.statuses = new Map(); // "<repo>#<number>" -> prStatus
 
     this.input = InputState.new({ placeholder: "" });
     this.input.on("submit", (_e, cx) => this.commitEdit(cx));
@@ -64,14 +68,13 @@ export default class Kanban extends View {
       await exec("mkdir", ["-p", DIR]);
       this.repos = JSON.parse(await readTextFile(REPOS).catch(() => null) ?? "{}");
       this.project = await this.detectProject();
-      if (this.project && this.repos[this.project] !== this.projectRoot) {
-        this.repos = { ...this.repos, [this.project]: this.projectRoot };
-        await writeTextFile(REPOS, JSON.stringify(this.repos, null, 2), await readTextFile(REPOS).catch(() => null)).catch(() => {});
-      }
+      if (this.project) await this.rememberRepo(this.project, this.projectRoot);
       await this.refresh(cx);
       if (this.boards.includes(this.project)) this.openBoard(this.project, cx);
+      await this.syncStatuses(cx);
     });
     cx.timer.every(POLL_MS, (cx) => { if (!this.editing) cx.spawn((cx) => this.refresh(cx)); });
+    cx.timer.every(STATUS_MS, (cx) => { if (!this.editing) cx.spawn((cx) => this.syncStatuses(cx)); });
   }
 
   // Files
@@ -128,7 +131,7 @@ export default class Kanban extends View {
     this.rows = COLUMNS.map(() => 0);
     this.confirmingDelete = false;
     storeBoard(board);
-    cx.spawn((cx) => this.refresh(cx));
+    cx.spawn(async (cx) => { await this.refresh(cx); await this.syncStatuses(cx); });
     cx.notify();
   }
 
@@ -243,6 +246,14 @@ export default class Kanban extends View {
       cx.stop_propagation();
       return;
     }
+    if (this.confirmingPr) {
+      const ask = this.confirmingPr;
+      this.confirmingPr = null;
+      if (event.keystroke === "y" || event.keystroke === "enter") this.openPullRequest(ask, cx);
+      cx.notify();
+      cx.stop_propagation();
+      return;
+    }
     const action = KEYS[event.keystroke];
     if (!action) return;
     this.perform(action, cx);
@@ -276,6 +287,7 @@ export default class Kanban extends View {
       case "delete-board": this.confirmingDelete = true; return cx.notify();
       case "open-diff": return this.openDiff(lanes[col][row]);
       case "link": return this.linkBranch(cx);
+      case "open-pr": return this.askPullRequest(cx);
       case "close": return props()?.overlay && closeOverlay(props().overlay);
       default: {
         const column = action.match(/^column-(\d)$/);
@@ -287,7 +299,30 @@ export default class Kanban extends View {
   // Links: a card's pull request or branch opens in snappy-diff.
 
   repoFor(board) {
-    return this.repos[board] ?? this.projectRoot;
+    return this.repos[board] ?? (board === this.project ? this.projectRoot : null);
+  }
+
+  async rememberRepo(board, folder) {
+    if (this.repos[board] === folder) return;
+    const before = await readTextFile(REPOS).catch(() => null);
+    this.repos = { ...this.repos, [board]: folder };
+    await writeTextFile(REPOS, JSON.stringify(this.repos, null, 2), before).catch(() => {});
+  }
+
+  // A board's repository when it hasn't been opened from inside it: a git repository named
+  // like the board, inside or next to the current project (~/code/app's board "api" finds
+  // ~/code/api, and a folder of projects that is itself a repository finds its children).
+  async findRepo(board) {
+    if (this.repoFor(board) || !this.projectRoot) return this.repoFor(board);
+    const parent = this.projectRoot.slice(0, this.projectRoot.lastIndexOf("/"));
+    for (const folder of [`${this.projectRoot}/${board}`, `${parent}/${board}`]) {
+      const top = await exec("git", ["-C", folder, "rev-parse", "--show-toplevel"]).catch(() => null);
+      if (top?.code === 0 && top.stdout.trim() === folder) {
+        await this.rememberRepo(board, folder);
+        return folder;
+      }
+    }
+    return null;
   }
 
   openDiff(card) {
@@ -304,13 +339,13 @@ export default class Kanban extends View {
     });
   }
 
-  // Links the selected card to the branch the focused terminal is on: its pull request
+  // Links the selected card to the branch its board's repository is on: its pull request
   // when it has one, the branch itself otherwise.
   linkBranch(cx) {
     const { lanes, col } = this;
     const row = this.rows[col];
     const card = lanes[col][row];
-    const repo = this.projectRoot;
+    const repo = this.repoFor(this.board);
     if (card == null || !repo) return;
     cx.spawn(async (cx) => {
       const branch = (await exec("git", ["-C", repo, "rev-parse", "--abbrev-ref", "HEAD"])).stdout.trim();
@@ -318,6 +353,90 @@ export default class Kanban extends View {
       const token = pr?.code === 0 && pr.stdout.trim() ? `#${pr.stdout.trim()}` : `@${branch}`;
       const old = cardLink(card)?.token;
       this.apply(editCard(this.lanes, col, row, old ? card.replace(old, token) : `${card} ${token}`), cx);
+    });
+  }
+
+  // Pull requests: their state on the card, cards that follow it, and opening one.
+
+  statusOf(card) {
+    const link = card && cardLink(card);
+    const repo = this.repoFor(this.board);
+    return link?.pr && repo ? this.statuses.get(`${repo}#${link.pr}`) ?? null : null;
+  }
+
+  // Asks gh about every pull request on the open board, then moves the cards that should
+  // follow: merged to done, open to test.
+  async syncStatuses(cx) {
+    const repo = await this.findRepo(this.board);
+    if (!repo) return;
+    const numbers = [...new Set(this.lanes.flat().map((card) => cardLink(card)?.pr).filter(Boolean))];
+    await Promise.all(numbers.map(async (n) => {
+      const result = await exec("gh", ["pr", "view", String(n), "--json", "state,isDraft,reviewDecision,statusCheckRollup"], { cwd: repo }).catch(() => null);
+      if (result?.code !== 0) return;
+      try { this.statuses.set(`${repo}#${n}`, prStatus(JSON.parse(result.stdout))); } catch { /* not JSON: skip it */ }
+    }));
+    this.followStatuses(cx);
+    cx.notify();
+  }
+
+  followStatuses(cx) {
+    const moves = [];
+    const lanes = this.lanes.map((lane) => [...lane]);
+    const columns = { test: COLUMNS.indexOf("Test"), done: COLUMNS.indexOf("Done") };
+    this.lanes.forEach((lane, col) => lane.forEach((card) => {
+      const status = this.statusOf(card);
+      const to = status && columnFor(status, col, columns);
+      if (to == null) return;
+      lanes[col].splice(lanes[col].indexOf(card), 1);
+      lanes[to].push(card);
+      moves.push(`#${cardLink(card).pr} → ${COLUMNS[to].toLowerCase()}`);
+    }));
+    if (!moves.length) return;
+    const history = (this.history[this.board] ??= { undo: [], redo: [] });
+    history.undo.push(this.lanes);
+    history.redo = [];
+    this.lanes = lanes;
+    this.clampRows();
+    this.save(cx);
+    notify({ title: "Board updated from GitHub", body: moves.join(", "), level: "info", timeout: 4000 });
+  }
+
+  // o: push the card's branch (or the current one) and open a pull request titled like the
+  // card. Asks first, since both are seen by others.
+  askPullRequest(cx) {
+    const { col } = this;
+    const row = this.rows[col];
+    const card = this.lanes[col][row];
+    if (card == null) return;
+    const link = cardLink(card);
+    if (link?.pr) { notify({ title: `Already linked to #${link.pr}`, level: "info", timeout: 2500 }); return; }
+    const repo = this.repoFor(this.board);
+    if (!repo) return;
+    cx.spawn(async (cx) => {
+      const branch = link?.branch ?? (await exec("git", ["-C", repo, "rev-parse", "--abbrev-ref", "HEAD"])).stdout.trim();
+      if (!branch || branch === "HEAD" || ["main", "master"].includes(branch)) {
+        notify({ title: "No branch to open a pull request from", body: "Link the card to a branch, or switch to one.", level: "warning" });
+        return;
+      }
+      this.confirmingPr = { col, row, branch, repo, title: withoutLink(card) };
+      cx.notify();
+    });
+  }
+
+  openPullRequest({ col, row, branch, repo, title }, cx) {
+    cx.spawn(async (cx) => {
+      const lastLine = (text) => text.trim().split("\n").pop();
+      const push = await exec("git", ["-C", repo, "push", "-u", "origin", branch]);
+      if (push.code !== 0) { notify({ title: `Couldn't push ${branch}`, body: lastLine(push.stderr), level: "error" }); return; }
+      const create = await exec("gh", ["pr", "create", "--head", branch, "--title", title, "--body", ""], { cwd: repo });
+      const number = create.code === 0 && numberFromUrl(create.stdout);
+      if (!number) { notify({ title: "Couldn't open the pull request", body: lastLine(create.stderr), level: "error" }); return; }
+      notify({ title: `Opened pull request #${number}`, body: title, level: "success", timeout: 4000 });
+      const card = this.lanes[col][row];
+      if (card == null || withoutLink(card) !== title) return; // the board moved on; the pull request still exists
+      const old = cardLink(card)?.token;
+      this.apply(editCard(this.lanes, col, row, old ? card.replace(old, `#${number}`) : `${card} #${number}`), cx);
+      await this.syncStatuses(cx);
     });
   }
 
@@ -385,8 +504,21 @@ export default class Kanban extends View {
       .child(div().flex_1().min_w(0).px(10).py(7)
         .text_color(done ? t.dim : selected ? t.foreground : t.muted)
         .child(withoutLink(text)))
-      .when(Boolean(link), (el) => el.child(div().mr(8).px(6).py(1).flex_none().rounded(4).bg(t.raised).text_size(11)
-        .text_color(done ? t.dim : t.accent).child(link?.pr ? `#${link.pr}` : `⎇ ${link?.branch}`)));
+      .when(Boolean(link), (el) => el.child(this.renderLink(t, link, this.statusOf(text), done)));
+  }
+
+  // The card's pull request as a chip: a dot for its state, the number, then checks and review.
+  renderLink(t, link, status, done) {
+    const chip = h_flex().mr(8).px(7).py(2).gap(6).items_center().flex_none().rounded(5).bg(t.raised).text_size(11);
+    if (link.branch) return chip.text_color(done ? t.dim : t.muted).child(`⎇ ${link.branch}`);
+    const state = { open: t.ansi2, draft: t.dim, merged: t.ansi5, closed: t.ansi1 }[status?.state] ?? t.border;
+    const checks = { passing: ["✓", t.ansi2], failing: ["✗", t.ansi1], pending: ["•", t.ansi3] }[status?.checks];
+    const review = { approved: ["approved", t.ansi2], changes: ["changes", t.ansi1] }[status?.review];
+    return chip
+      .child(div().size(6).rounded(3).bg(state))
+      .child(div().text_color(done ? t.dim : t.foreground).child(`#${link.pr}`))
+      .when(Boolean(checks), (el) => el.child(div().text_color(checks[1]).child(checks[0])))
+      .when(Boolean(review), (el) => el.child(div().text_color(review[1]).child(review[0])));
   }
 
   renderInput(t, id) {
@@ -399,10 +531,19 @@ export default class Kanban extends View {
     if (this.confirmingDelete) {
       return div().text_color(t.blocked).child(`Delete board "${this.board}"? y to confirm, any other key cancels`);
     }
+    if (this.confirmingPr) {
+      const { branch, title } = this.confirmingPr;
+      return div().text_color(t.accent).child(`Push ${branch} and open a pull request "${title}"? y to confirm, any other key cancels`);
+    }
     if (this.editing) return div().text_color(t.dim).child("enter save · esc cancel");
     const offer = this.project && !this.boards.includes(this.project) ? `p board for ${this.project} · ` : "";
     const card = this.lanes[this.col][this.rows[this.col]];
-    const link = card != null && (cardLink(card) ? "g open diff · " : this.projectRoot ? "@ link branch · " : "");
-    return div().text_color(t.dim).child(offer + (link || "") + HINT);
+    const link = card != null ? cardLink(card) : null;
+    const status = link?.pr && this.statusOf(card);
+    const about = card == null ? ""
+      : link?.pr ? `${status ? describe(link.pr, status) : `#${link.pr}`} · g open diff · `
+      : link?.branch ? "g open diff · o open pull request · "
+      : this.repoFor(this.board) ? "@ link branch · o open pull request · " : "";
+    return div().text_color(t.dim).child(offer + about + HINT);
   }
 }

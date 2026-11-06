@@ -77,6 +77,7 @@ test("cardLink finds a pull request or a branch in the card's text", () => {
   assert.deepEqual(cardLink("Review https://github.com/o/r/pull/7/files"), { pr: 7, token: "https://github.com/o/r/pull/7" });
   assert.deepEqual(cardLink("Try @feature/login-v2 first"), { branch: "feature/login-v2", token: "@feature/login-v2" });
   assert.equal(cardLink("Issue#3 is not a link, nor is mail@x"), null);
-  assert.equal(withoutLink("Fix login #42 today"), "Fix login today");
+  assert.equal(withoutLink("Fix login #42"), "Fix login");
+  assert.equal(withoutLink("whole document view (#46, PR #47)"), "whole document view (#46, PR #47)");
   assert.equal(withoutLink("No link"), "No link");
 });

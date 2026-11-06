@@ -19,8 +19,9 @@ My development environment, built on [Herdr](https://herdr.dev). Work is planned
 | `← → ↑ ↓` or `h l k j` | Move between cards and columns |
 | `⇧` + move | Move the card |
 | `n` / `e` / `d` | New, edit, delete card |
-| `@` | Link the card to the current branch's pull request (or the branch) |
+| `@` | Link the card to its repository's branch: the pull request, or the branch |
 | `g` | Open the linked pull request or branch in snappy-diff |
+| `o` | Push the card's branch and open a pull request titled like the card (asks first) |
 | `⌘Z` / `⌘⇧Z` | Undo / redo |
 | `[` `]` | Switch board |
 | `b` / `p` / `⇧D` | New board, board for this project, delete board |
@@ -38,7 +39,7 @@ Boards live in `~/kanban/<board>.md`. A board named after a git repository is th
 - Pick a domain
 ```
 
-`#42` links a card to pull request 42 and `@branch` to a branch. Edits made elsewhere show up within a few seconds, so agents can update the board too.
+`#42` links a card to pull request 42 and `@branch` to a branch. A linked card shows its pull request: a dot for open, draft, merged or closed, then its checks and review. Cards follow it: an open pull request moves its card to test, a merged one to done. Edits made elsewhere show up within a few seconds, so agents can update the board too.
 
 ## snappy-diff
 
@@ -59,7 +60,7 @@ A native port of [snappy-diff](https://github.com/duartecaldascardoso/snappy-dif
 | `⌘B` | Toggle the sidebar |
 | `?` | Settings: split or unified, whitespace, editor |
 
-**Copy for AI** turns your comments into a prompt with files, lines and code. Viewed files and comments are kept per branch. Pull requests are fetched with the GitHub CLI (`gh`).
+**Send to agent** types your comments, with files, lines and code, into the agent working on that branch; when the code they were on changes, it tells you they were addressed. The copy button puts the same prompt on the clipboard. Viewed files and comments are kept per branch. Pull requests are fetched with the GitHub CLI (`gh`).
 
 ## herdr
 
