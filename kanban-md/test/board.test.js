@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   COLUMNS, emptyLanes, parse, serialize, boardName,
-  addCard, editCard, removeCard, shiftCard, reorderCard, cardLink, withoutLink,
+  addCard, editCard, removeCard, shiftCard, reorderCard, cardLinks, withoutLinks, withLink,
 } from "../mods/kanban-md/board.js";
 
 const lanes = (...cards) => COLUMNS.map((_, i) => cards[i] ?? []);
@@ -72,12 +72,22 @@ test("edits never mutate the lanes they are given", () => {
   assert.deepEqual(before, copy);
 });
 
-test("cardLink finds a pull request or a branch in the card's text", () => {
-  assert.deepEqual(cardLink("Fix login #42"), { pr: 42, token: "#42" });
-  assert.deepEqual(cardLink("Review https://github.com/o/r/pull/7/files"), { pr: 7, token: "https://github.com/o/r/pull/7" });
-  assert.deepEqual(cardLink("Try @feature/login-v2 first"), { branch: "feature/login-v2", token: "@feature/login-v2" });
-  assert.equal(cardLink("Issue#3 is not a link, nor is mail@x"), null);
-  assert.equal(withoutLink("Fix login #42"), "Fix login");
-  assert.equal(withoutLink("whole document view (#46, PR #47)"), "whole document view (#46, PR #47)");
-  assert.equal(withoutLink("No link"), "No link");
+test("cardLinks finds numbers and a branch in a card's text", () => {
+  assert.deepEqual(cardLinks("Fix login #42"), { refs: [{ n: 42, kind: null, token: "#42" }], branch: null, branchToken: null });
+  assert.deepEqual(cardLinks("UK NHS numbers issue #34 @feature/nhs").refs, [{ n: 34, kind: "issue", token: "issue #34" }]);
+  assert.equal(cardLinks("UK NHS numbers issue #34 @feature/nhs").branch, "feature/nhs");
+  assert.deepEqual(cardLinks("Whole view (#46, PR #47)").refs.map((r) => [r.n, r.kind]), [[46, null], [47, "pr"]]);
+  assert.deepEqual(cardLinks("See https://github.com/o/r/issues/7 and https://github.com/o/r/pull/8/files").refs.map((r) => [r.n, r.kind]),
+    [[7, "issue"], [8, "pr"]]);
+  assert.equal(cardLinks("Issue#3 is not a link, nor is mail@x"), null);
+});
+
+test("withoutLinks drops the links at the end; withLink adds one", () => {
+  assert.equal(withoutLinks("UK NHS numbers issue #34 @feature/nhs #51"), "UK NHS numbers");
+  assert.equal(withoutLinks("whole document view (#46, PR #47)"), "whole document view (#46, PR #47)");
+  assert.equal(withoutLinks("No link"), "No link");
+  assert.equal(withLink("Pricing", "@feature/pricing"), "Pricing @feature/pricing");
+  assert.equal(withLink("Pricing @old", "@feature/pricing"), "Pricing @feature/pricing");
+  assert.equal(withLink("Pricing issue #3", "#9"), "Pricing issue #3 #9");
+  assert.equal(withLink("Pricing #9", "#9"), "Pricing #9");
 });

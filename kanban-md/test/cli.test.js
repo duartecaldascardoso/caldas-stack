@@ -36,7 +36,8 @@ test("kanban refuses what it can't do clearly", () => {
   assert.equal(ambiguous.code, 1);
   assert.match(ambiguous.out, /matches 2 cards; use its number:\n {2}1\. Fix login\n {2}2\. Fix logout/);
   assert.match(kanban(dir, "add", "later", "x").out, /unknown column "later"/);
-  assert.match(kanban(dir, "link", "1", "42").out, /link to "#<number>" or "@<branch>"/);
+  assert.match(kanban(dir, "link", "1", "42").out, /link to "#<number>", "issue #<number>" or "@<branch>"/);
+  assert.equal(kanban(dir, "link", "1", "issue", "#34").out, "linked: Fix login issue #34");
   assert.match(kanban(dir, "rm", "9").out, /no card 9; the board has 2/);
 });
 

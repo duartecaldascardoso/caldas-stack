@@ -77,22 +77,55 @@ export function reorderCard(lanes, col, row, step) {
   return { lanes: lanes.map((l, i) => (i === col ? lane : l)), col, row: to };
 }
 
-// What a card is linked to: a pull request ("#42", or its GitHub URL) or a branch
-// ("@feature/login"). The link stays in the card's text, so the file remains plain markdown.
-export function cardLink(text) {
-  const url = text.match(/https:\/\/github\.com\/[^\s]+\/pull\/(\d+)/);
-  if (url) return { pr: Number(url[1]), token: url[0] };
-  const pr = text.match(/(?:^|\s)#(\d+)\b/);
-  if (pr) return { pr: Number(pr[1]), token: `#${pr[1]}` };
-  const branch = text.match(/(?:^|\s)@([\w./-]+[\w-])/);
-  if (branch) return { branch: branch[1], token: `@${branch[1]}` };
-  return null;
+// What a card is linked to, written in its text so the file stays plain markdown:
+// numbers ("#42", "issue #34", "PR #47", or a GitHub issue or pull request URL) and a branch
+// ("@feature/login"). { refs: [{ n, kind, token }], branch, branchToken }, or null. A ref's kind
+// is "pr" or "issue" when the text says so, and null for a bare "#42": GitHub settles it.
+const URL_REF = /https:\/\/github\.com\/[^\s/]+\/[^\s/]+\/(pull|issues)\/(\d+)\S*/g;
+const WORD_REF = /(^|[\s(,])((?:(issue|pr)\s+)?#(\d+))\b/gi;
+const BRANCH = /(?:^|\s)(@([\w./-]*[\w-]))/;
+
+export function cardLinks(text) {
+  const refs = [];
+  for (const m of text.matchAll(URL_REF)) refs.push({ n: Number(m[2]), kind: m[1] === "pull" ? "pr" : "issue", token: m[0] });
+  const withoutUrls = text.replace(URL_REF, " ");
+  for (const m of withoutUrls.matchAll(WORD_REF)) {
+    const n = Number(m[4]);
+    if (refs.some((r) => r.n === n)) continue;
+    refs.push({ n, kind: m[3] ? (m[3].toLowerCase() === "pr" ? "pr" : "issue") : null, token: m[2] });
+  }
+  const branch = text.match(BRANCH);
+  if (!refs.length && !branch) return null;
+  return { refs, branch: branch?.[2] ?? null, branchToken: branch?.[1] ?? null };
 }
 
-// The card's text without its link, for showing the link apart. Only a link at the end comes
-// off (where "@" puts it); one inside a sentence ("PR #47 needs a test") stays readable.
-export function withoutLink(text) {
-  const link = cardLink(text);
-  const trimmed = text.trimEnd();
-  return link && trimmed.endsWith(link.token) ? trimmed.slice(0, -link.token.length).trimEnd() : text;
+// The card's text without the links at its end, for showing them apart. Links inside a
+// sentence ("PR #47 needs a test") stay where they are.
+export function withoutLinks(text) {
+  const links = cardLinks(text);
+  if (!links) return text;
+  const tokens = [...links.refs.map((r) => r.token), links.branchToken].filter(Boolean);
+  let rest = text.trimEnd();
+  for (let found = true; found;) {
+    found = false;
+    for (const token of tokens) {
+      if (rest.endsWith(token) && rest.length > token.length) {
+        rest = rest.slice(0, -token.length).trimEnd();
+        found = true;
+      }
+    }
+  }
+  return rest;
+}
+
+// The card's text with one more link at its end: "#42", "issue #34" or "@branch". A branch
+// replaces the card's branch; a number it already has is left as it is.
+export function withLink(text, token) {
+  if (token.startsWith("@")) {
+    const old = cardLinks(text)?.branchToken;
+    return old ? text.replace(old, token) : `${text.trimEnd()} ${token}`;
+  }
+  const n = Number(token.match(/#(\d+)/)?.[1]);
+  if (cardLinks(text)?.refs.some((r) => r.n === n)) return text;
+  return `${text.trimEnd()} ${token}`;
 }
