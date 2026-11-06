@@ -46,3 +46,12 @@ test("checkoutOf finds the worktree already on a branch", async () => {
   assert.equal(checkoutOf(porcelain, "main"), "/repo");
   assert.equal(checkoutOf(porcelain, "feature"), null);
 });
+
+test("wrapText breaks at spaces, and inside a word only when it must", async () => {
+  const { wrapText, cardHeight } = await import("../mods/kanban-md/cards.js");
+  assert.deepEqual(wrapText("Viewer memory on huge reports", 14), ["Viewer memory", "on huge", "reports"]);
+  assert.deepEqual(wrapText("abcdefghij", 4), ["abcd", "efgh", "ij"]);
+  assert.deepEqual(wrapText("short", 20), ["short"]);
+  assert.equal(cardHeight(1, false), 2 + 20 + 18 + 6);
+  assert.equal(cardHeight(2, true), 2 + 20 + 36 + 8 + 22 + 6);
+});

@@ -1,6 +1,6 @@
 // kanban-md: plain-text kanban boards for Herdr, one markdown file per board in ~/kanban.
 import { View, div } from "gpui-kit";
-import { v_flex, h_flex, InputState, Input } from "gpui-base";
+import { v_flex, h_flex, InputState, Input, Scrollbar, v_virtual_list, VirtualListScrollHandle } from "gpui-base";
 import { home, props, openOverlay, closeOverlay, readTextFile, writeTextFile, exec, focused, notify, run, agents, panes, knownAgents, settings, theme } from "herdr";
 import {
   COLUMNS, emptyLanes, parse, serialize, boardName,
@@ -8,6 +8,11 @@ import {
 } from "./board.js";
 import { prStatus, columnFor, describe, numberFromUrl } from "./links.js";
 import { branchFor, worktreePath, cardBranch, agentsByBranch, finished, checkoutOf } from "./work.js";
+import { LINE_H, PAD_Y, CHIPS_H, CHIPS_GAP, CARD_GAP, INPUT_H, wrapText, cardHeight } from "./cards.js";
+
+const TEXT_SIZE = 13;
+// Card text sits inside: the column's border, the list's 8px sides, the card's border and 12px sides.
+const CARD_INSET = 2 + 16 + 2 + 24;
 
 const DIR = `${home()}/kanban`;
 const TRASH = `${DIR}/.trash`;
@@ -31,7 +36,7 @@ const KEYS = {
   "1": "column-1", "2": "column-2", "3": "column-3", "4": "column-4", "5": "column-5",
 };
 
-const HINTS = [["←→↑↓", "move"], ["⇧", "move card"], ["n", "new"], ["e", "edit"], ["d", "delete"], ["⌘Z", "undo"], ["[ ]", "board"], ["b", "new board"]];
+const HINTS = [["←→↑↓", "move"], ["⇧", "move card"], ["n", "new"], ["e", "edit"], ["d", "delete"], ["⌘Z", "undo"], ["[ ]", "board"], ["b", "new board"], ["⇧D", "delete board"]];
 // Each column's dot, from the theme's palette.
 const COLUMN_TINTS = ["ansi5", "ansi4", "ansi3", "ansi6", "ansi2"];
 const alpha = (color, hex) => (/^#[0-9a-f]{6}$/i.test(color) ? color + hex : color);
@@ -65,6 +70,10 @@ export default class Kanban extends View {
     this.agentsBefore = agentsByBranch(agents(), panes());
     this.statuses = new Map(); // "<repo>#<number>" -> prStatus
 
+    // Each column is a virtual list, so moving the cursor can scroll its card into view.
+    this.scrolls = COLUMNS.map(() => VirtualListScrollHandle.new());
+    this.columnW = 0; // measured
+    this.charW = TEXT_SIZE * 0.6; // measured from the code font
     this.input = InputState.new({ placeholder: "" });
     this.input.on("submit", (_e, cx) => this.commitEdit(cx));
     this.handle = cx.focus_handle();
@@ -545,12 +554,35 @@ export default class Kanban extends View {
     const t = theme();
     const font = settings().font_family;
     this.agentMap = agentsByBranch(agents(), panes());
+    this.revealCursor();
     return v_flex().id("kanban").track_focus(this.handle).on_key_down((e, cx) => this.onKey(e, cx))
       .size_full().px(18).pt(16).pb(12).gap(14).bg(t.canvas).text_color(t.foreground).text_size(13)
       .when(Boolean(font), (el) => el.font_family(font))
       .child(this.renderTop(t))
       .child(h_flex().flex_1().min_h(0).gap(12).children(COLUMNS.map((name, c) => this.renderColumn(t, name, c))))
-      .child(this.renderHint(t));
+      .child(this.renderHint(t))
+      // Measures the font's character width, which card wrapping is computed from.
+      .child(div().id("probe").absolute().top(-100).left(0).opacity(0).whitespace_nowrap().text_size(TEXT_SIZE)
+        .when(Boolean(font), (el) => el.font_family(font))
+        .on_size_change((size, cx) => {
+          const width = size.width / 100;
+          if (width > 0 && Math.abs(width - this.charW) > 0.01) { this.charW = width; cx.notify(); }
+        })
+        .child("0".repeat(100)));
+  }
+
+  // Keeps the cursor's card on screen: scrolls its column when the cursor or the board changes.
+  revealCursor() {
+    const row = this.editing?.kind === "card" && this.editing.row === null ? this.lanes[this.col].length : this.rows[this.col];
+    // The column's length too: the first render comes before the board's file is read.
+    const key = `${this.board}|${this.col}|${row}|${this.lanes[this.col].length}`;
+    if (key === this.revealed) return;
+    this.revealed = key;
+    this.scrolls[this.col].scroll_to_item(Math.max(0, row), "top");
+  }
+
+  cardCols() {
+    return Math.max(8, Math.floor((this.columnW - CARD_INSET) / this.charW));
   }
 
   // Board tabs on the left, progress on the right.
@@ -587,39 +619,57 @@ export default class Kanban extends View {
     const cards = this.lanes[c];
     const adding = this.editing?.kind === "card" && this.editing.col === c && this.editing.row === null;
     const tint = t[COLUMN_TINTS[c]];
+    const cols = this.cardCols();
+    const items = cards.map((text, r) => ({ text, r })).concat(adding ? [{ input: true }] : []);
+    const sizes = items.map((item) => {
+      const editingThis = this.editing?.kind === "card" && this.editing.col === c && this.editing.row === item.r;
+      if (item.input || editingThis) return INPUT_H + CARD_GAP;
+      const chips = Boolean(cardLink(item.text)) || Boolean(this.agentOf(item.text));
+      return cardHeight(wrapText(withoutLink(item.text), cols).length, chips);
+    });
     return v_flex().id(`col-${c}`).flex_1().min_w(0).h_full().rounded(10).border_1()
       .border_color(active ? alpha(t.accent, "66") : t.border).bg(t.background)
+      .when(c === 0, (el) => el.on_size_change((size, cx) => {
+        if (Math.abs(size.width - this.columnW) > 1) { this.columnW = size.width; cx.notify(); }
+      }))
+      .on_mouse_down("left", (e) => { this.pressCount = e.click_count; })
       .on_click((_e, cx) => { if (!active) { this.col = c; this.handle.focus(); cx.notify(); } })
       .child(h_flex().px(12).pt(12).pb(10).gap(8).items_center()
         .child(div().size(8).rounded(4).bg(tint))
         .child(div().flex_1().text_size(12.5).font_semibold().text_color(active ? t.foreground : t.muted).child(name))
         .child(div().px(7).py(1).rounded(8).bg(t.raised).text_size(11).text_color(t.dim).child(String(cards.length))))
-      .child(v_flex().id(`cards-${c}`).flex_1().min_h(0).overflow_y_scrollbar().px(8).pb(8).gap(6)
-        .children(cards.map((text, r) => this.renderCard(t, c, r, text)))
-        .when(adding, (el) => el.child(this.renderInput(t, `new-${c}`)))
-        .when(!cards.length && !adding, (el) => el.child(div().mx(4).py(14).flex().justify_center().rounded(8)
-          .border_1().border_color(alpha(t.border, "99")).text_size(12).text_color(t.dim)
-          .child(active ? "n to add a card" : "No cards"))));
+      .when(!items.length, (el) => el.child(div().mx(12).py(14).flex().justify_center().rounded(8)
+        .border_1().border_color(alpha(t.border, "99")).text_size(12).text_color(t.dim)
+        .child(active ? "n to add a card" : "No cards")))
+      .when(items.length > 0, (el) => el.child(div().flex_1().min_h(0).relative().px(8).pb(2)
+        .child(v_virtual_list(`cards-${c}`, items.length, sizes, (i) => (items[i].input ? "new" : `card-${items[i].r}`), (range) =>
+          items.slice(range.start, range.end).map((item, i) => div().h(sizes[range.start + i]).pb(CARD_GAP)
+            .child(item.input ? this.renderInput(t, `new-${c}`) : this.renderCard(t, c, item.r, item.text, cols))))
+          .track_scroll(this.scrolls[c]).size_full()
+          .on_item_click((key, cx) => {
+            if (!key.startsWith("card-")) return;
+            const r = Number(key.slice(5));
+            this.col = c;
+            this.rows[c] = r;
+            if (this.pressCount > 1) this.startEdit({ kind: "card", col: c, row: r }, this.lanes[c][r], cx);
+            else { this.handle.focus(); cx.notify(); }
+          }))
+        .child(Scrollbar.vertical(`cards-${c}`).absolute().inset_0())));
   }
 
-  renderCard(t, c, r, text) {
+  renderCard(t, c, r, text, cols) {
     const editing = this.editing;
     if (editing?.kind === "card" && editing.col === c && editing.row === r) return this.renderInput(t, `edit-${c}-${r}`);
     const selected = !editing && c === this.col && r === this.rows[c];
     const done = c === COLUMNS.length - 1;
     const link = cardLink(text);
     const agent = this.agentOf(text);
-    return v_flex().id(`card-${c}-${r}`).px(12).py(10).gap(8).rounded(8).border_1().cursor_pointer()
+    return v_flex().px(12).py(PAD_Y).gap(CHIPS_GAP).rounded(8).border_1().cursor_pointer()
       .border_color(selected ? t.accent : t.border).bg(selected ? t.selected : t.raised)
       .hover((s) => s.border_color(selected ? t.accent : t.input))
-      .on_click((event, cx) => {
-        this.col = c;
-        this.rows[c] = r;
-        if (event.click_count > 1) this.startEdit({ kind: "card", col: c, row: r }, text, cx);
-        else { this.handle.focus(); cx.notify(); }
-      })
-      .child(div().text_color(done ? t.muted : t.foreground).child(withoutLink(text)))
-      .when(Boolean(link) || Boolean(agent), (el) => el.child(h_flex().gap(6).flex_wrap()
+      .child(v_flex().text_color(done ? t.muted : t.foreground).children(wrapText(withoutLink(text), cols).map((line) =>
+        h_flex().h(LINE_H).items_center().whitespace_nowrap().child(line))))
+      .when(Boolean(link) || Boolean(agent), (el) => el.child(h_flex().h(CHIPS_H).gap(6).items_center()
         .when(Boolean(link), (row) => row.child(this.renderLink(t, link, this.statusOf(text), done)))
         .when(Boolean(agent), (row) => row.child(this.renderAgent(t, agent)))));
   }
