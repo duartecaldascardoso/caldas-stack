@@ -7,7 +7,7 @@ import {
   addCard, editCard, removeCard, shiftCard, reorderCard, cardLinks, withoutLinks, withLink,
 } from "./board.js";
 import { prStatus, issueStatus, columnFor, describe, numberFromUrl } from "./links.js";
-import { branchFor, worktreePath, cardBranch, agentsByBranch, finished, checkoutOf, playbookOf, taskFor, hasPstack } from "./work.js";
+import { branchFor, worktreePath, cardBranch, agentsByBranch, finished, checkoutOf, playbookOf, taskFor, hasPstack, babysitFor, babysitTask } from "./work.js";
 import { LINE_H, PAD_Y, CHIPS_H, CHIPS_GAP, CHIPS_ROW_GAP, CHIP_GAP, CARD_GAP, INPUT_H, wrapText, cardHeight, chipLayout } from "./cards.js";
 
 const TEXT_SIZE = 13;
@@ -34,7 +34,7 @@ const KEYS = {
   "cmd-z": "undo", "cmd-shift-z": "redo",
   "[": "prev-board", "shift-tab": "prev-board", "]": "next-board", "tab": "next-board",
   "b": "new-board", "p": "project-board", "shift-d": "delete-board", "escape": "close",
-  "g": "open-diff", "shift-2": "link", "@": "link", "o": "open-pr", "s": "start-work",
+  "g": "open-diff", "shift-2": "link", "@": "link", "o": "open-pr", "s": "start-work", "shift-b": "babysit",
   "1": "column-1", "2": "column-2", "3": "column-3", "4": "column-4", "5": "column-5",
 };
 
@@ -69,6 +69,7 @@ export default class Kanban extends View {
     this.confirmingDelete = false;
     this.confirmingPr = null; // { col, row, branch, repo, title } waiting for y
     this.confirmingStart = null; // { col, row, card, branch, repo, agent } waiting for y
+    this.confirmingBabysit = null; // { card, branch, repo, agent, pstack, sit } waiting for y
     this.agentsBefore = agentsByBranch(agents(), panes());
     this.statuses = new Map(); // "<repo>#<number>" -> prStatus
 
@@ -284,6 +285,14 @@ export default class Kanban extends View {
       cx.stop_propagation();
       return;
     }
+    if (this.confirmingBabysit) {
+      const ask = this.confirmingBabysit;
+      this.confirmingBabysit = null;
+      if (event.keystroke === "y" || event.keystroke === "enter") this.babysit(ask, cx);
+      cx.notify();
+      cx.stop_propagation();
+      return;
+    }
     const action = KEYS[event.keystroke];
     if (!action) return;
     this.perform(action, cx);
@@ -319,6 +328,7 @@ export default class Kanban extends View {
       case "link": return this.linkBranch(cx);
       case "open-pr": return this.askPullRequest(cx);
       case "start-work": return this.askStartWork(cx);
+      case "babysit": return this.askBabysit(cx);
       case "close": return props()?.overlay && closeOverlay(props().overlay);
       default: {
         const column = action.match(/^column-(\d)$/);
@@ -425,7 +435,7 @@ export default class Kanban extends View {
       try { return parse(JSON.parse(result.stdout)); } catch { return null; }
     };
     await Promise.all([...refs].map(async ([n, kind]) => {
-      const pr = kind === "issue" ? null : await gh(["pr", "view", String(n), "--json", "state,isDraft,reviewDecision,statusCheckRollup,headRefName"], prStatus);
+      const pr = kind === "issue" ? null : await gh(["pr", "view", String(n), "--json", "state,isDraft,reviewDecision,statusCheckRollup,headRefName,mergeable"], prStatus);
       const status = pr ?? (kind === "pr" ? null : await gh(["issue", "view", String(n), "--json", "state,stateReason,url"], issueStatus));
       if (status) this.statuses.set(`${repo}#${n}`, status);
     }));
@@ -513,33 +523,49 @@ export default class Kanban extends View {
     const branch = this.branchOf(card) ?? branchFor(withoutLinks(card));
     const issue = this.linksOf(card)?.issue?.n ?? null;
     cx.spawn(async (cx) => {
-      const agent = (await knownAgents().catch(() => [])).find((a) => a.installed);
-      if (!agent) {
-        notify({ title: "No agent to start", body: "Install one Herdr knows, like Claude Code or Codex.", level: "warning" });
-        return;
-      }
-      const pstack = agent.key === "claude" && hasPstack(await readTextFile(`${home()}/.claude/plugins/installed_plugins.json`).catch(() => null));
-      this.confirmingStart = { col, row, card, branch, repo, agent, issue, pstack };
+      const picked = await this.pickAgent();
+      if (!picked) return;
+      this.confirmingStart = { col, row, card, branch, repo, issue, ...picked };
       cx.notify();
     });
   }
 
+  // The first installed agent Herdr knows, and whether it is Claude Code with pstack: { agent, pstack }.
+  async pickAgent() {
+    const agent = (await knownAgents().catch(() => [])).find((a) => a.installed);
+    if (!agent) {
+      notify({ title: "No agent to start", body: "Install one Herdr knows, like Claude Code or Codex.", level: "warning" });
+      return null;
+    }
+    const pstack = agent.key === "claude" && hasPstack(await readTextFile(`${home()}/.claude/plugins/installed_plugins.json`).catch(() => null));
+    return { agent, pstack };
+  }
+
+  // The folder checked out on branch: an existing checkout, else a new worktree on the branch,
+  // made from the default branch when the branch doesn't exist yet. Null when git fails.
+  async checkout(repo, branch) {
+    const git = (args) => exec("git", ["-C", repo, ...args]);
+    const folder = checkoutOf((await git(["worktree", "list", "--porcelain"])).stdout, branch);
+    if (folder) return folder;
+    const path = worktreePath(home(), repo, branch);
+    const hasBranch = (await git(["rev-parse", "--verify", "--quiet", `refs/heads/${branch}`])).code === 0;
+    if (!hasBranch) await git(["fetch", "--quiet", "origin", branch]); // a pull request opened elsewhere
+    const remote = (await git(["rev-parse", "--verify", "--quiet", `refs/remotes/origin/${branch}`])).code === 0;
+    const base = (await git(["symbolic-ref", "--short", "refs/remotes/origin/HEAD"])).stdout.trim() || "HEAD";
+    const made = await git(hasBranch ? ["worktree", "add", path, branch]
+      : remote ? ["worktree", "add", "-b", branch, path, `origin/${branch}`]
+      : ["worktree", "add", "-b", branch, path, base]);
+    if (made.code !== 0) {
+      notify({ title: `Couldn't make a worktree for ${branch}`, body: made.stderr.trim().split("\n").pop(), level: "error" });
+      return null;
+    }
+    return path;
+  }
+
   startWork({ col, row, card, branch, repo, agent, issue, pstack }, cx) {
     cx.spawn(async (cx) => {
-      const git = (args, cwd = repo) => exec("git", ["-C", cwd, ...args]);
-      const path = worktreePath(home(), repo, branch);
-      // An existing checkout of the branch is reused; otherwise one is made from the default branch.
-      let folder = checkoutOf((await git(["worktree", "list", "--porcelain"])).stdout, branch);
-      if (!folder) {
-        const hasBranch = (await git(["rev-parse", "--verify", "--quiet", `refs/heads/${branch}`])).code === 0;
-        const base = (await git(["symbolic-ref", "--short", "refs/remotes/origin/HEAD"])).stdout.trim() || "HEAD";
-        const made = await git(hasBranch ? ["worktree", "add", path, branch] : ["worktree", "add", "-b", branch, path, base]);
-        if (made.code !== 0) {
-          notify({ title: `Couldn't make a worktree for ${branch}`, body: made.stderr.trim().split("\n").pop(), level: "error" });
-          return;
-        }
-        folder = path;
-      }
+      const folder = await this.checkout(repo, branch);
+      if (!folder) return;
       const title = withoutLinks(card);
       run("space.new", { name: playbookOf(title).title.slice(0, 40), folder, argv: agent.run, task: taskFor(title, issue, pstack) });
       const wip = COLUMNS.indexOf("WIP");
@@ -551,6 +577,41 @@ export default class Kanban extends View {
       lanes[wip].push(linked);
       this.apply({ lanes, col: wip, row: lanes[wip].length - 1 }, cx);
       notify({ title: `Started ${title}`, body: `${agent.name ?? "Agent"} on ${branch}`, level: "success", timeout: 3000 });
+    });
+  }
+
+  // ⇧B: an agent on the card's pull request, in its branch's checkout, with pstack's Babysit
+  // playbook: driven to merge-ready when conflicts, changes requested or failing checks block
+  // it, else one status pass. One babysitter per branch, so not while an agent is on it. Asks first.
+  askBabysit(cx) {
+    const card = this.lanes[this.col][this.rows[this.col]];
+    const repo = this.repoFor(this.board);
+    const pr = card != null ? this.linksOf(card)?.pr : null;
+    const sit = pr ? babysitFor(pr.n, pr.status) : null;
+    const branch = card != null ? this.branchOf(card) : null;
+    if (!repo || !sit || !branch) {
+      notify({ title: "Nothing to babysit", body: "The card needs an open pull request.", level: "warning", timeout: 3000 });
+      return;
+    }
+    const busy = this.agentOf(card);
+    if (busy) {
+      notify({ title: `${busy.name} is already on ${branch}`, body: "One agent per pull request.", level: "warning", timeout: 3000 });
+      return;
+    }
+    cx.spawn(async (cx) => {
+      const picked = await this.pickAgent();
+      if (!picked) return;
+      this.confirmingBabysit = { card, branch, repo, sit, ...picked };
+      cx.notify();
+    });
+  }
+
+  babysit({ card, branch, repo, agent, pstack, sit }, cx) {
+    cx.spawn(async () => {
+      const folder = await this.checkout(repo, branch);
+      if (!folder) return;
+      run("space.new", { name: `Babysit #${sit.number}`, folder, argv: agent.run, task: babysitTask(sit, withoutLinks(card), pstack) });
+      notify({ title: `Babysitting #${sit.number}`, body: `${agent.name ?? "Agent"} on ${branch}, ${sit.mode}`, level: "success", timeout: 3000 });
     });
   }
 
@@ -782,6 +843,12 @@ export default class Kanban extends View {
       const playbook = pstack ? ` with pstack ${playbookOf(withoutLinks(card)).playbook ?? "poteto-mode"}` : "";
       return line.child(div().text_color(t.accent).child(`Start ${agent.name ?? "an agent"}${playbook} on ${branch} in a new worktree?`)).child(this.keys(t, [["y", "start"], ["any key", "cancel"]]));
     }
+    if (this.confirmingBabysit) {
+      const { agent, pstack, sit } = this.confirmingBabysit;
+      const why = sit.blockers.length ? ` (${sit.blockers.join(", ")})` : "";
+      const how = sit.mode === "drive" ? `to merge-ready${why}` : "for one status check";
+      return line.child(div().text_color(t.accent).child(`Babysit #${sit.number} ${how} with ${agent.name ?? "an agent"}${pstack ? " and pstack" : ""}?`)).child(this.keys(t, [["y", "babysit"], ["any key", "cancel"]]));
+    }
     if (this.editing) return line.child(this.keys(t, [["↵", "save"], ["esc", "cancel"]]));
     const card = this.lanes[this.col][this.rows[this.col]];
     const links = card != null ? this.linksOf(card) : null;
@@ -795,6 +862,7 @@ export default class Kanban extends View {
         ...(!this.agentOf(card) ? [["s", "start work"]] : []),
         ...(!branch ? [["@", "link branch"]] : []),
         ...(!links?.pr ? [["o", "open pull request"]] : []),
+        ...(links?.pr && babysitFor(links.pr.n, status) && !this.agentOf(card) ? [["⇧B", "babysit"]] : []),
       ];
     const offer = this.project && !this.boards.includes(this.project) ? [["p", `board for ${this.project}`]] : [];
     const agent = card != null ? this.agentOf(card) : null;

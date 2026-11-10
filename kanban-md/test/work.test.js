@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { branchFor, worktreePath, cardBranch, agentsByBranch, finished, playbookOf, taskFor, hasPstack } from "../mods/kanban-md/work.js";
+import { branchFor, worktreePath, cardBranch, agentsByBranch, finished, playbookOf, taskFor, hasPstack, babysitFor, babysitTask } from "../mods/kanban-md/work.js";
 
 test("branchFor makes a branch name from a card", () => {
   assert.equal(branchFor("Pricing page v2!"), "feature/pricing-page-v2");
@@ -28,6 +28,22 @@ test("taskFor runs the card through poteto-mode only with pstack", () => {
   assert.equal(taskFor("Bug: login fails", 12, false), "login fails (GitHub issue #12)");
   assert.equal(taskFor("Bug: login fails", 12, true), "/pstack:poteto-mode Bug fix playbook. login fails (GitHub issue #12)");
   assert.equal(taskFor("Pricing page", null, true), "/pstack:poteto-mode Pricing page");
+});
+
+test("babysitFor drives a blocked pull request and checks on the rest", () => {
+  assert.deepEqual(babysitFor(4, { kind: "pr", state: "open", checks: "failing", review: "changes", conflicts: true }),
+    { number: 4, mode: "drive", blockers: ["conflicts", "changes requested", "checks failing"] });
+  assert.deepEqual(babysitFor(5, { kind: "pr", state: "draft", checks: "passing", review: null }), { number: 5, mode: "check", blockers: [] });
+  assert.equal(babysitFor(6, { kind: "pr", state: "merged" }), null);
+  assert.equal(babysitFor(7, { kind: "issue", state: "open" }), null);
+  assert.equal(babysitFor(8, null), null);
+});
+
+test("babysitTask runs the Babysit playbook with pstack, and spells out its rules without", () => {
+  const drive = { number: 4, mode: "drive", blockers: ["checks failing"] };
+  assert.equal(babysitTask(drive, "Bug: login fails", true), "/pstack:poteto-mode Babysit playbook, drive mode. Pull request #4 (checks failing): login fails");
+  assert.match(babysitTask(drive, "Bug: login fails", false), /^Get pull request #4 merge-ready \(checks failing\): login fails\. .*don't merge\.$/);
+  assert.match(babysitTask({ number: 5, mode: "check", blockers: [] }, "Pricing", false), /^Check on pull request #5: Pricing\. .*Change nothing\.$/);
 });
 
 test("hasPstack finds pstack among Claude Code's installed plugins", () => {
