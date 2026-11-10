@@ -6,6 +6,8 @@ import { existsSync, readdirSync, readFileSync, renameSync, writeFileSync, mkdir
 import { homedir } from "node:os";
 import { basename, join } from "node:path";
 import { COLUMNS, parse, serialize, addCard, editCard, removeCard, withLink } from "../mods/kanban-md/board.js";
+import { playbookNamed, PLAYBOOK_LIST } from "../mods/kanban-md/work.js";
+import { STEP_STATUSES, parseRuns, recordPlaybook, recordStep, progress } from "../mods/kanban-md/runs.js";
 
 const DIR = process.env.KANBAN_DIR ?? join(homedir(), "kanban");
 
@@ -19,6 +21,11 @@ const USAGE = `kanban: plain-text kanban boards in ${DIR.replace(homedir(), "~")
   kanban edit <card> <text>      change a card's text
   kanban link <card> <link>      link a card: #42 (pull request or issue), issue #34, @branch
   kanban rm <card>               delete a card
+
+  For the agent working on the current branch:
+  kanban playbook <name>         the pstack playbook it follows: ${PLAYBOOK_LIST.map((p) => p.playbook).join(", ")}
+  kanban step <n> <status> [note]   step n is now, done or skipped
+  kanban run                     the playbook's steps and where the work stands
 
   -b, --board <name>   the board (default: the git repository you are in, else main)
   columns: ${COLUMNS.map((c) => c.toLowerCase()).join(", ")}`;
@@ -81,10 +88,39 @@ function show(board, lanes) {
 
 // Writes through a temporary file, so the board never reads half a file.
 function save(path, board, lanes) {
-  mkdirSync(DIR, { recursive: true });
+  write(path, serialize(board, lanes));
+}
+
+function write(path, text) {
+  mkdirSync(join(path, ".."), { recursive: true });
   const tmp = `${path}.tmp-${process.pid}`;
-  writeFileSync(tmp, serialize(board, lanes));
+  writeFileSync(tmp, text);
   renameSync(tmp, path);
+}
+
+function currentBranch() {
+  try {
+    const branch = execFileSync("git", ["symbolic-ref", "--short", "-q", "HEAD"], { stdio: ["ignore", "pipe", "ignore"] }).toString().trim();
+    if (branch) return branch;
+  } catch {
+    // not in a repository
+  }
+  return fail("run it inside the branch's checkout");
+}
+
+// A run as a checklist: "✓ 1 reproduce  Reproduce it yourself…", the step in hand marked ●.
+function showRun(branch, run) {
+  if (!run) return `no playbook on ${branch} yet; \`kanban playbook <name>\` sets one`;
+  const playbook = playbookNamed(run.playbook);
+  if (!playbook) return `${run.playbook} on ${branch}`;
+  const { done, current } = progress(run, playbook.steps.length);
+  const lines = [`${playbook.playbook} on ${branch}: ${done}/${playbook.steps.length}`];
+  playbook.steps.forEach(([label, step], i) => {
+    const s = run.steps[i + 1];
+    const mark = s?.status === "done" ? "✓" : s?.status === "skipped" ? "–" : current === i + 1 ? "●" : "○";
+    lines.push(`  ${mark} ${i + 1} ${label.padEnd(11)} ${step}${s?.note ? `  (${s.note})` : ""}`);
+  });
+  return lines.join("\n");
 }
 
 export function main(argv) {
@@ -99,6 +135,8 @@ export function main(argv) {
   }
 
   board ??= defaultBoard();
+  const runsFile = (name) => join(DIR, ".runs", `${name}.json`);
+  const readRuns = (name) => parseRuns(existsSync(runsFile(name)) ? readFileSync(runsFile(name), "utf8") : "");
   const path = join(DIR, `${board}.md`);
   const lanes = parse(existsSync(path) ? readFileSync(path, "utf8") : "");
   const change = (result, message) => {
@@ -137,6 +175,30 @@ export function main(argv) {
       const text = withLink(card.text, token);
       if (text === card.text) return `already linked: ${text}`;
       return change(editCard(lanes, card.col, card.row, text), `linked: ${text}`);
+    }
+    case "playbook": {
+      const playbook = playbookNamed(rest.join(" "));
+      if (!playbook) fail(`unknown playbook "${rest.join(" ")}"; one of: ${PLAYBOOK_LIST.map((p) => p.playbook).join(", ")}`);
+      const branch = currentBranch();
+      const runs = recordPlaybook(readRuns(board), branch, playbook.playbook, new Date().toISOString());
+      write(runsFile(board), JSON.stringify(runs, null, 2));
+      return showRun(branch, runs[branch]);
+    }
+    case "step": {
+      const [n, status, ...note] = rest;
+      if (!/^\d+$/.test(n ?? "") || Number(n) < 1) fail("give the step's number, from 1");
+      if (!STEP_STATUSES.includes(status)) fail(`a step is ${STEP_STATUSES.join(", ")}, not "${status ?? ""}"`);
+      const branch = currentBranch();
+      const before = readRuns(board);
+      const steps = playbookNamed(before[branch]?.playbook)?.steps.length;
+      if (steps && Number(n) > steps) fail(`${before[branch].playbook} has ${steps} steps`);
+      const runs = recordStep(before, branch, Number(n), status, note.join(" "), new Date().toISOString());
+      write(runsFile(board), JSON.stringify(runs, null, 2));
+      return showRun(branch, runs[branch]);
+    }
+    case "run": {
+      const branch = currentBranch();
+      return showRun(branch, readRuns(board)[branch]);
     }
     case "rm": {
       const card = findCard(lanes, rest[0]);
