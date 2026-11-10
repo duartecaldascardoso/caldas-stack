@@ -67,3 +67,34 @@ test("ago says how long since", async () => {
   assert.equal(ago("2026-11-07T12:00:00Z", now), "3 d");
   assert.equal(ago(null, now), null);
 });
+
+test("summarize turns an agent's markdown into a lead, points and its question", async () => {
+  const { summarize } = await import("../mods/kanban-md/runs.js");
+  const text = [
+    "The **inspector** is built and in `#5`.",
+    "",
+    "## What changed",
+    "- **Loop:** a track of stations",
+    "- Steps as a timeline,",
+    "  with notes under them",
+    "- A bar",
+    "",
+    "```sh",
+    "npm test",
+    "```",
+    "| a | b |",
+    "",
+    "1. Press `?`",
+    "2. Press `i`",
+    "",
+    "Should I merge #3 first?",
+  ].join("\n");
+  assert.deepEqual(summarize(text), {
+    lead: "The inspector is built and in #5.",
+    points: ["Loop: a track of stations", "Steps as a timeline, with notes under them", "A bar", "Press ?"],
+    more: 2,
+    question: "Should I merge #3 first?",
+  });
+  assert.deepEqual(summarize(""), { lead: null, points: [], more: 0, question: null });
+  assert.ok(summarize("x".repeat(500)).lead.length <= 240);
+});
