@@ -1,6 +1,9 @@
 # caldas-stack
 
-My development environment, built on [Herdr](https://herdr.dev): a plain-text kanban board to plan work, and a native diff viewer to review it and hand the review to an agent.
+My development environment: a plain-text kanban board to plan work, and a native diff viewer to review it and hand the review to an agent. It is built on top of two projects:
+
+- **[Herdr](https://herdr.dev)**, the window it runs in. Herdr keeps the terminals, spaces and agents; caldas-stack's boards and diff viewer are Herdr mods.
+- **[pstack](https://github.com/cursor/plugins/tree/main/pstack)** (p-stack), [Lauren Tan](https://github.com/poteto)'s engineering playbooks for agents, in Claude Code. An agent started from a card works through `/pstack:poteto-mode`: a playbook for the card (Bug fix, Feature, Perf issue and more), verified work, and a pull request at the end.
 
 | | |
 | --- | --- |
@@ -11,7 +14,7 @@ My development environment, built on [Herdr](https://herdr.dev): a plain-text ka
 ## How it fits
 
 1. **Plan:** a card on the project's board (`⌘⇧K`), or `kanban add` from any terminal.
-2. **Start:** `s` on a card makes a worktree and branch for it and starts an agent with the card as its task.
+2. **Start:** `s` on a card makes a worktree and branch for it and starts an agent with the card as its task, through a pstack playbook when Claude Code has pstack.
 3. **Follow:** the card shows its agent working, blocked or ready; when it finishes, a toast opens its diff.
 4. **Review:** comment on lines and **Send to agent**, or post the review to GitHub; `o` on the board opens the pull request.
 5. **Iterate:** the viewer says when comments are addressed, and **N new commits since your review** shows only what changed.
@@ -35,7 +38,7 @@ Five columns: ideas, todo, wip, test, done. Every board is a markdown file in `~
 ```
 
 - **Project boards:** a board named after a git repository opens first inside it, and `p` creates one for the current project.
-- **Start work:** `s` makes a worktree on `feature/<card>` (in `~/.herdr/worktrees`, where Herdr nests it under the repository), opens a space there with your agent and the card as its first task, links the card to the branch and moves it to wip.
+- **Start work:** `s` makes a worktree on `feature/<card>` (in `~/.herdr/worktrees`, where Herdr nests it under the repository), opens a space there with your agent and the card as its first task, links the card to the branch and moves it to wip. With [pstack](https://github.com/cursor/plugins/tree/main/pstack) in Claude Code (`/plugin marketplace add cursor/plugins`, then `/plugin install pstack@cursor-plugins`), the agent works the card through `/pstack:poteto-mode`. Start a card with `bug:`, `perf:`, `refactor:`, `spike:`, `investigate:` or `feat:` to pick the playbook and the branch (`bug: login fails` is the Bug fix playbook on `fix/login-fails`); without one, poteto-mode picks.
 - **Agents on cards:** a card shows the agent on its branch (working, blocked, ready, idle). While the board is open, an agent that finishes says the card is ready for review; the toast opens its diff.
 - **Links:** `#42` links a card to pull request or issue 42 (GitHub says which; `issue #34` and `PR #42` say it outright) and `@branch` to a branch. A card can have several. It shows a pull request's state (open, draft, merged, closed), checks and review, and an issue's state.
 - **Cards follow GitHub:** opening a pull request moves its card to test, merging it or completing the issue moves it to done.
@@ -101,7 +104,7 @@ A native port of [snappy-diff](https://github.com/duartecaldascardoso/snappy-dif
 
 ## Install
 
-Needs [Herdr](https://herdr.dev) and git; the pull request features use the [GitHub CLI](https://cli.github.com) (`gh`), signed in.
+Needs [Herdr](https://herdr.dev) and git; the pull request features use the [GitHub CLI](https://cli.github.com) (`gh`), signed in. For playbooks, install [pstack](https://github.com/cursor/plugins/tree/main/pstack) in Claude Code: `/plugin marketplace add cursor/plugins`, then `/plugin install pstack@cursor-plugins`, then `/pstack:setup-pstack` to pick its models.
 
 Ask an agent in Herdr to add `github.com/duartecaldascardoso/caldas-stack/kanban-md` (or `/snappy-diff`), or by hand:
 
