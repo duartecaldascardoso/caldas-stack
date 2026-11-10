@@ -53,3 +53,29 @@ test("kanban picks the repository's board, from a worktree too", () => {
   assert.match(show(repo), /# app/);
   assert.match(show(join(dir, "wt")), /From the app board/);
 });
+
+test("kanban records a branch's playbook and its steps beside the board", () => {
+  const dir = mkdtempSync(join(tmpdir(), "kanban-"));
+  const repo = join(dir, "app");
+  execFileSync("git", ["init", "-q", "-b", "fix/login", "app"], { cwd: dir });
+  writeFileSync(join(dir, "app.md"), "# app\n\n## WIP\n- bug: login fails @fix/login\n");
+  const run = (...args) => {
+    try {
+      return execFileSync(BIN, args, { cwd: repo, env: { ...process.env, KANBAN_DIR: dir } }).toString().trim();
+    } catch (e) {
+      return e.stderr.toString().trim();
+    }
+  };
+  assert.match(run("run"), /no playbook on fix\/login yet/);
+  assert.match(run("playbook", "bug"), /^Bug fix on fix\/login: 0\/6\n {2}● 1 reproduce/);
+  run("step", "1", "done", "fails on main");
+  const out = run("step", "2", "now");
+  assert.match(out, /^Bug fix on fix\/login: 1\/6/);
+  assert.match(out, /✓ 1 reproduce .*\(fails on main\)/);
+  assert.match(out, /● 2 narrow/);
+  assert.match(run("step", "7", "done"), /Bug fix has 6 steps/);
+  assert.match(run("step", "1", "finished"), /a step is now, done, skipped/);
+  assert.match(run("playbook", "hillclimb"), /unknown playbook "hillclimb"/);
+  const saved = JSON.parse(readFileSync(join(dir, ".runs", "app.json"), "utf8"));
+  assert.equal(saved["fix/login"].steps[2].status, "now");
+});

@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { branchFor, worktreePath, cardBranch, agentsByBranch, finished, playbookOf, taskFor, hasPstack, babysitFor, babysitTask } from "../mods/kanban-md/work.js";
+import { branchFor, worktreePath, cardBranch, agentsByBranch, finished, playbookOf, taskFor, hasPstack, babysitFor, babysitTask, PLAYBOOK_LIST, playbookNamed, REPORT } from "../mods/kanban-md/work.js";
 
 test("branchFor makes a branch name from a card", () => {
   assert.equal(branchFor("Pricing page v2!"), "feature/pricing-page-v2");
@@ -24,10 +24,22 @@ test("playbookOf reads a playbook prefix, and leaves other text alone", () => {
   assert.equal(playbookOf("Investigate: why sync drops cards").playbook, "Investigation");
 });
 
-test("taskFor runs the card through poteto-mode only with pstack", () => {
-  assert.equal(taskFor("Bug: login fails", 12, false), "login fails (GitHub issue #12)");
-  assert.equal(taskFor("Bug: login fails", 12, true), "/pstack:poteto-mode Bug fix playbook. login fails (GitHub issue #12)");
-  assert.equal(taskFor("Pricing page", null, true), "/pstack:poteto-mode Pricing page");
+test("taskFor runs the card through poteto-mode with pstack, and spells out the steps without", () => {
+  assert.equal(taskFor("Bug: login fails", 12, true), `/pstack:poteto-mode Bug fix playbook. login fails (GitHub issue #12). ${REPORT}`);
+  assert.equal(taskFor("Pricing page", null, true), `/pstack:poteto-mode Pricing page. Once you pick a playbook, run \`kanban playbook <name>\`. ${REPORT}`);
+  assert.match(taskFor("Bug: login fails", 12, false), /^login fails \(GitHub issue #12\)\. Work through these steps: 1\. Reproduce it yourself, where it happens\. 2\. .* 6\. Open the pull request\. Report each step/);
+  assert.equal(taskFor("Pricing page", null, false), "Pricing page");
+});
+
+test("every playbook has labelled steps, and is found by name or word", () => {
+  for (const p of PLAYBOOK_LIST) {
+    assert.ok(p.steps.length >= 4 && p.ends, p.playbook);
+    for (const [label, step] of p.steps) assert.ok(label.length <= 11 && step.length > label.length, `${p.playbook}: ${label}`);
+  }
+  assert.equal(playbookNamed("bug fix").playbook, "Bug fix");
+  assert.equal(playbookNamed("BUG").playbook, "Bug fix");
+  assert.equal(playbookNamed("Babysit").steps.length, 9);
+  assert.equal(playbookNamed("Hillclimb"), null);
 });
 
 test("babysitFor drives a blocked pull request and checks on the rest", () => {
@@ -41,7 +53,7 @@ test("babysitFor drives a blocked pull request and checks on the rest", () => {
 
 test("babysitTask runs the Babysit playbook with pstack, and spells out its rules without", () => {
   const drive = { number: 4, mode: "drive", blockers: ["checks failing"] };
-  assert.equal(babysitTask(drive, "Bug: login fails", true), "/pstack:poteto-mode Babysit playbook, drive mode. Pull request #4 (checks failing): login fails");
+  assert.equal(babysitTask(drive, "Bug: login fails", true), `/pstack:poteto-mode Babysit playbook, drive mode. Pull request #4 (checks failing): login fails. ${REPORT}`);
   assert.match(babysitTask(drive, "Bug: login fails", false), /^Get pull request #4 merge-ready \(checks failing\): login fails\. .*don't merge\.$/);
   assert.match(babysitTask({ number: 5, mode: "check", blockers: [] }, "Pricing", false), /^Check on pull request #5: Pricing\. .*Change nothing\.$/);
 });
@@ -73,7 +85,7 @@ test("agentsByBranch joins agents to their pane's branch, most urgent first", ()
   ];
   const panes = [{ pane: "p1", branch: "feature/pricing" }, { pane: "p2", branch: "feature/pricing" }, { pane: "p3", branch: "main" }, { pane: "p4", branch: null }];
   const by = agentsByBranch(agents, panes);
-  assert.deepEqual(by.get("feature/pricing"), { status: "blocked", address: "t2", name: "Claude Code" });
+  assert.deepEqual(by.get("feature/pricing"), { status: "blocked", address: "t2", name: "Claude Code", cwd: null });
   assert.equal(by.get("main").name, "pi");
   assert.equal(by.size, 2);
 });
