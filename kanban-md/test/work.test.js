@@ -93,3 +93,7 @@ test("chipRows wraps chips that don't fit", async () => {
   assert.equal(chipRows([80, 80, 80], 200), 2);
   assert.equal(chipRows([300], 200), 1); // a chip wider than the card still takes one row
 });
+
+test("a deliberately failing test, to try babysit on the board", () => {
+  assert.equal(1, 2);
+});
