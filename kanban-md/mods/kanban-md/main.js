@@ -8,7 +8,7 @@ import {
 } from "./board.js";
 import { prStatus, issueStatus, columnFor, describe, numberFromUrl } from "./links.js";
 import { branchFor, worktreePath, cardBranch, agentsByBranch, finished, checkoutOf, playbookOf, taskFor, hasPstack, babysitFor, babysitTask, playbookNamed, PLAYBOOK_LIST } from "./work.js";
-import { parseRuns, recordPlaybook, progress, LOOP, stationOf, lastMessage, ago } from "./runs.js";
+import { parseRuns, recordPlaybook, progress, LOOP, stationOf, lastMessage, ago, summarize } from "./runs.js";
 import { LINE_H, PAD_Y, CHIPS_H, CHIPS_GAP, CHIPS_ROW_GAP, CHIP_GAP, CARD_GAP, INPUT_H, wrapText, cardHeight, chipLayout } from "./cards.js";
 
 const TEXT_SIZE = 13;
@@ -1028,7 +1028,6 @@ export default class Kanban extends View {
     const station = stationOf(this.col, { working: Boolean(agent || run?.playbook), playbook: run?.playbook });
     const at = book && run ? progress(run, book.steps.length) : null;
     const since = (iso) => { const a = ago(iso); return a && (a === "just now" ? a : `${a} ago`); };
-    const doing = { working: "is working", blocked: "needs you", done: "is ready for review", idle: "is idle" };
     const pr = links?.pr;
     const prColor = { open: t.ansi2, draft: t.dim, merged: t.ansi5, closed: t.ansi1 }[pr?.status?.state] ?? t.dim;
     const facts = [
@@ -1045,9 +1044,7 @@ export default class Kanban extends View {
           .when(Boolean(book), (el) => el.child(h_flex().gap(6).items_center().child(div().size(7).rounded_full().bg(t.ansi5)).child(`${book.playbook} playbook`)))
           .when(Boolean(branch), (el) => el.child(`⎇ ${branch}`))
           .when(Boolean(pr), (el) => el.child(h_flex().gap(6).items_center().child(div().size(7).rounded_full().bg(prColor))
-            .child(pr.status ? describe(pr.n, pr.status) : `#${pr.n}`)))
-          .when(Boolean(agent), (el) => el.child(h_flex().gap(6).items_center().child(this.agentMark(t, agent))
-            .child(`${agent.name} ${doing[agent.status] ?? agent.status}`)))))
+            .child(pr.status ? describe(pr.n, pr.status) : `#${pr.n}`)))))
       .child(this.renderTrack(t, station))
       .child(h_flex().gap(28).items_start()
         .child(v_flex().flex_1().min_w(0).gap(16)
@@ -1061,20 +1058,47 @@ export default class Kanban extends View {
           .when(Boolean(book), (el) => el.child(this.renderEnds(t, book)))
           .when(Boolean(book && planned), (el) => el.child(div().text_size(11.5).text_color(t.dim).whitespace_normal()
             .child(this.col <= 1 ? "Steps fill in once s starts an agent and it reports them." : "The agent hasn't reported a step yet."))))
-        .child(v_flex().w(360).flex_none().gap(18)
-          .child(v_flex().gap(8)
-            .child(h_flex().justify_between().items_center().child(this.label(t, "Latest from the agent"))
-              .when(Boolean(detail?.message?.at), (el) => el.child(div().text_size(11).text_color(t.dim).child(since(detail.message.at)))))
-            .child(detail?.message
-              ? div().pl(12).pr(10).py(8).border_l(2).border_color(t.accent).bg(t.canvas).rounded_r(6).text_size(12)
-                .line_height(18).text_color(t.foreground).whitespace_normal()
-                .child(detail.message.text.length > 600 ? `${detail.message.text.slice(0, 600)}…` : detail.message.text)
-              : div().text_size(12).text_color(t.dim).whitespace_normal()
-                .child(agent ? "Nothing yet, or this agent keeps no Claude Code transcript." : this.col <= 1 ? "No agent yet. s starts one." : "No agent on this branch now.")))
-          .child(v_flex().gap(0).child(this.label(t, "Details")).child(div().h(6))
-            .children(facts.map(([k, v]) => h_flex().justify_between().gap(12).py(7).border_b(1).border_color(t.border).text_size(12)
-              .child(div().flex_none().text_color(t.dim).child(k))
-              .child(div().min_w(0).truncate().text_color(t.muted).child(v)))))));
+        .child(v_flex().w(360).flex_none().gap(22)
+          .child(v_flex().gap(8).child(this.label(t, "Agent")).child(this.renderAgent(t, agent, detail?.message)))
+          .child(v_flex().gap(8).child(this.label(t, "Details"))
+            .child(v_flex().children(facts.map(([k, v], i) => h_flex().gap(12).py(6)
+              .when(i > 0, (el) => el.border_t(1).border_color(t.border)).text_size(12)
+              .child(div().w(96).flex_none().text_color(t.dim).child(k))
+              .child(div().flex_1().min_w(0).truncate().text_color(t.muted).child(v))))))));
+  }
+
+  // The card's agent: its status, then its last message organised (summarize): the lead, a few
+  // points, how much more there is, and when it's blocked, its question.
+  renderAgent(t, agent, message) {
+    const box = v_flex().gap(10).p(14).rounded(8).border_1().border_color(t.border).bg(t.canvas);
+    if (!agent && !message) {
+      return box.child(div().text_size(12).text_color(t.dim).whitespace_normal()
+        .child(this.col <= 1 ? "No agent yet. s starts one." : "No agent on this branch now."));
+    }
+    const doing = { working: ["working", t.working], blocked: ["needs you", t.blocked], done: ["ready for review", t.done], idle: ["idle", t.dim] };
+    const [word, color] = doing[agent?.status] ?? ["not running", t.dim];
+    const when = message?.at ? ago(message.at) : null;
+    const sum = message ? summarize(message.text) : null;
+    return box
+      .child(h_flex().gap(8).items_center()
+        .when(Boolean(agent), (el) => el.child(this.agentMark(t, agent)))
+        .child(div().font_medium().child(agent?.name ?? "Agent"))
+        .child(div().text_size(12).text_color(color).child(word))
+        .child(div().flex_1())
+        .when(Boolean(when), (el) => el.child(div().text_size(11).text_color(t.dim).child(when === "just now" ? when : `${when} ago`))))
+      .when(!sum, (el) => el.child(div().text_size(12).text_color(t.dim).whitespace_normal()
+        .child("No message yet, or this agent keeps no Claude Code transcript.")))
+      .when(Boolean(sum && agent?.status === "blocked" && sum.question), (el) => el.child(v_flex().gap(4).px(10).py(8).rounded(6)
+        .bg(alpha(t.blocked, "1f")).border_1().border_color(alpha(t.blocked, "55"))
+        .child(div().text_size(10.5).font_medium().text_color(t.blocked).child("NEEDS YOU"))
+        .child(div().text_size(12).text_color(t.foreground).line_height(18).whitespace_normal().child(sum.question))))
+      .when(Boolean(sum?.lead), (el) => el.child(div().text_size(12.5).text_color(t.foreground).line_height(19).whitespace_normal().child(sum.lead)))
+      .when(Boolean(sum?.points.length), (el) => el.child(v_flex().gap(6).children(sum.points.map((point) =>
+        h_flex().gap(8).items_start().text_size(12)
+          .child(div().w(10).flex_none().text_color(t.dim).child("•"))
+          .child(div().flex_1().min_w(0).text_color(t.muted).line_height(17).whitespace_normal().child(point))))))
+      .when(Boolean(sum?.more), (el) => el.child(div().text_size(11).text_color(t.dim)
+        .child(`${sum.more} more in the agent's tab`)));
   }
 
   // The six stations as a track: numbered nodes joined by a line, the columns matching the
