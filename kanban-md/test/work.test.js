@@ -1,12 +1,41 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { branchFor, worktreePath, cardBranch, agentsByBranch, finished } from "../mods/kanban-md/work.js";
+import { branchFor, worktreePath, cardBranch, agentsByBranch, finished, playbookOf, taskFor, hasPstack } from "../mods/kanban-md/work.js";
 
 test("branchFor makes a branch name from a card", () => {
   assert.equal(branchFor("Pricing page v2!"), "feature/pricing-page-v2");
   assert.equal(branchFor("Café menu — night"), "feature/cafe-menu-night");
   assert.equal(branchFor("!!!"), "feature/card");
   assert.ok(branchFor("a ".repeat(60)).length <= "feature/".length + 48);
+});
+
+test("branchFor puts a playbook's work on its own branch prefix", () => {
+  assert.equal(branchFor("Bug: login fails"), "fix/login-fails");
+  assert.equal(branchFor("perf: slow board"), "perf/slow-board");
+  assert.equal(branchFor("Spike: drag cards"), "spike/drag-cards");
+  assert.equal(branchFor("Note: not a playbook"), "feature/note-not-a-playbook");
+});
+
+test("playbookOf reads a playbook prefix, and leaves other text alone", () => {
+  assert.deepEqual(playbookOf("Bug: login fails"), { playbook: "Bug fix", branch: "fix", title: "login fails" });
+  assert.deepEqual(playbookOf("REFACTOR : split main.js"), { playbook: "Refactoring", branch: "refactor", title: "split main.js" });
+  assert.deepEqual(playbookOf("Ship it: launch post"), { playbook: null, branch: "feature", title: "Ship it: launch post" });
+  assert.deepEqual(playbookOf("bug:"), { playbook: null, branch: "feature", title: "bug:" });
+  assert.equal(playbookOf("Investigate: why sync drops cards").playbook, "Investigation");
+});
+
+test("taskFor runs the card through poteto-mode only with pstack", () => {
+  assert.equal(taskFor("Bug: login fails", 12, false), "login fails (GitHub issue #12)");
+  assert.equal(taskFor("Bug: login fails", 12, true), "/pstack:poteto-mode Bug fix playbook. login fails (GitHub issue #12)");
+  assert.equal(taskFor("Pricing page", null, true), "/pstack:poteto-mode Pricing page");
+});
+
+test("hasPstack finds pstack among Claude Code's installed plugins", () => {
+  assert.equal(hasPstack(JSON.stringify({ version: 2, plugins: { "pstack@cursor-plugins": [{}] } })), true);
+  assert.equal(hasPstack(JSON.stringify({ "pstack@pstack-claude": [{}] })), true);
+  assert.equal(hasPstack(JSON.stringify({ version: 2, plugins: { "typesafe@typesafe-ai": [{}] } })), false);
+  assert.equal(hasPstack(null), false);
+  assert.equal(hasPstack("not json"), false);
 });
 
 test("worktreePath follows Herdr's worktree layout", () => {

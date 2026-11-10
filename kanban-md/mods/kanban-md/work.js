@@ -1,10 +1,51 @@
 // Starting work from a card, and the agents working on cards. Pure.
 
+// Card prefixes that name a pstack playbook (pstack/skills/poteto-mode/playbooks), and the
+// branch prefix its work goes on. "Bug: login fails" is the Bug fix playbook on fix/login-fails.
+const PLAYBOOKS = [
+  { words: ["bug", "fix"], playbook: "Bug fix", branch: "fix" },
+  { words: ["perf"], playbook: "Perf issue", branch: "perf" },
+  { words: ["refactor"], playbook: "Refactoring", branch: "refactor" },
+  { words: ["spike", "prototype"], playbook: "Prototype", branch: "spike" },
+  { words: ["investigate", "question"], playbook: "Investigation", branch: "investigate" },
+  { words: ["feat", "feature"], playbook: "Feature", branch: "feature" },
+];
+
+// A card's playbook, branch prefix and text without the prefix. No prefix: no playbook, so
+// poteto-mode picks one, and the work goes on feature/.
+export function playbookOf(text) {
+  const m = text.match(/^\s*([a-z]+)\s*:\s*(.*)$/is);
+  const found = m && PLAYBOOKS.find((p) => p.words.includes(m[1].toLowerCase()));
+  if (!found || !m[2].trim()) return { playbook: null, branch: "feature", title: text.trim() };
+  return { playbook: found.playbook, branch: found.branch, title: m[2].trim() };
+}
+
 // A branch name from a card's text: "Pricing page v2!" -> "feature/pricing-page-v2".
 export function branchFor(text) {
-  const slug = text.toLowerCase().normalize("NFKD").replace(/[̀-ͯ]/g, "")
+  const { branch, title } = playbookOf(text);
+  const slug = title.toLowerCase().normalize("NFKD").replace(/[̀-ͯ]/g, "")
     .replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 48).replace(/-+$/, "");
-  return `feature/${slug || "card"}`;
+  return `${branch}/${slug || "card"}`;
+}
+
+// The agent's first message. With pstack installed in Claude Code, the card runs through
+// poteto-mode, naming the card's playbook when it has one.
+export function taskFor(text, issue, pstack) {
+  const { playbook, title } = playbookOf(text);
+  const task = issue ? `${title} (GitHub issue #${issue})` : title;
+  if (!pstack) return task;
+  return `/pstack:poteto-mode ${playbook ? `${playbook} playbook. ` : ""}${task}`;
+}
+
+// Whether Claude Code has pstack, from ~/.claude/plugins/installed_plugins.json: the official
+// plugin (pstack@cursor-plugins) or a port (pstack@pstack-claude).
+export function hasPstack(installed) {
+  try {
+    const json = JSON.parse(installed ?? "");
+    return Object.keys(json?.plugins ?? json ?? {}).some((key) => key.startsWith("pstack@"));
+  } catch {
+    return false;
+  }
 }
 
 // Where Herdr's worktree mod keeps checkouts, so the spaces sidebar nests them under their

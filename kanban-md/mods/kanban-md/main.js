@@ -7,7 +7,7 @@ import {
   addCard, editCard, removeCard, shiftCard, reorderCard, cardLinks, withoutLinks, withLink,
 } from "./board.js";
 import { prStatus, issueStatus, columnFor, describe, numberFromUrl } from "./links.js";
-import { branchFor, worktreePath, cardBranch, agentsByBranch, finished, checkoutOf } from "./work.js";
+import { branchFor, worktreePath, cardBranch, agentsByBranch, finished, checkoutOf, playbookOf, taskFor, hasPstack } from "./work.js";
 import { LINE_H, PAD_Y, CHIPS_H, CHIPS_GAP, CHIPS_ROW_GAP, CHIP_GAP, CARD_GAP, INPUT_H, wrapText, cardHeight, chipLayout } from "./cards.js";
 
 const TEXT_SIZE = 13;
@@ -499,6 +499,7 @@ export default class Kanban extends View {
 
   // s: a worktree on a branch named after the card, a space there with an agent that gets the
   // card (and its issue) as its task, the card linked to the branch and moved to wip. Asks first.
+  // Claude Code with pstack gets the card through poteto-mode, with the card's playbook.
   askStartWork(cx) {
     const { col } = this;
     const row = this.rows[col];
@@ -517,12 +518,13 @@ export default class Kanban extends View {
         notify({ title: "No agent to start", body: "Install one Herdr knows, like Claude Code or Codex.", level: "warning" });
         return;
       }
-      this.confirmingStart = { col, row, card, branch, repo, agent, issue };
+      const pstack = agent.key === "claude" && hasPstack(await readTextFile(`${home()}/.claude/plugins/installed_plugins.json`).catch(() => null));
+      this.confirmingStart = { col, row, card, branch, repo, agent, issue, pstack };
       cx.notify();
     });
   }
 
-  startWork({ col, row, card, branch, repo, agent, issue }, cx) {
+  startWork({ col, row, card, branch, repo, agent, issue, pstack }, cx) {
     cx.spawn(async (cx) => {
       const git = (args, cwd = repo) => exec("git", ["-C", cwd, ...args]);
       const path = worktreePath(home(), repo, branch);
@@ -539,7 +541,7 @@ export default class Kanban extends View {
         folder = path;
       }
       const title = withoutLinks(card);
-      run("space.new", { name: title.slice(0, 40), folder, argv: agent.run, task: issue ? `${title} (GitHub issue #${issue})` : title });
+      run("space.new", { name: playbookOf(title).title.slice(0, 40), folder, argv: agent.run, task: taskFor(title, issue, pstack) });
       const wip = COLUMNS.indexOf("WIP");
       const linked = cardLinks(card)?.branch ? card : withLink(card, `@${branch}`);
       const lanes = this.lanes.map((lane) => [...lane]);
@@ -776,8 +778,9 @@ export default class Kanban extends View {
       return line.child(div().text_color(t.accent).child(`Push ${branch} and open a pull request "${title}"?`)).child(this.keys(t, [["y", "open"], ["any key", "cancel"]]));
     }
     if (this.confirmingStart) {
-      const { branch, agent } = this.confirmingStart;
-      return line.child(div().text_color(t.accent).child(`Start ${agent.name ?? "an agent"} on ${branch} in a new worktree?`)).child(this.keys(t, [["y", "start"], ["any key", "cancel"]]));
+      const { branch, agent, card, pstack } = this.confirmingStart;
+      const playbook = pstack ? ` with pstack ${playbookOf(withoutLinks(card)).playbook ?? "poteto-mode"}` : "";
+      return line.child(div().text_color(t.accent).child(`Start ${agent.name ?? "an agent"}${playbook} on ${branch} in a new worktree?`)).child(this.keys(t, [["y", "start"], ["any key", "cancel"]]));
     }
     if (this.editing) return line.child(this.keys(t, [["↵", "save"], ["esc", "cancel"]]));
     const card = this.lanes[this.col][this.rows[this.col]];
