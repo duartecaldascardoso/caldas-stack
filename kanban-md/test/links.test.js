@@ -4,12 +4,13 @@ import { prStatus, issueStatus, columnFor, describe, numberFromUrl } from "../mo
 
 test("prStatus reads state, checks and review from gh", () => {
   assert.deepEqual(prStatus({ state: "OPEN", isDraft: false, reviewDecision: "APPROVED", statusCheckRollup: [{ conclusion: "SUCCESS" }, { state: "SUCCESS" }] }),
-    { kind: "pr", state: "open", checks: "passing", review: "approved", branch: null });
+    { kind: "pr", state: "open", checks: "passing", review: "approved", branch: null, conflicts: false });
   assert.deepEqual(prStatus({ state: "OPEN", isDraft: true, reviewDecision: "", statusCheckRollup: [{ status: "IN_PROGRESS", conclusion: "" }] }),
-    { kind: "pr", state: "draft", checks: "pending", review: null, branch: null });
+    { kind: "pr", state: "draft", checks: "pending", review: null, branch: null, conflicts: false });
   assert.deepEqual(prStatus({ state: "MERGED", statusCheckRollup: [{ conclusion: "SUCCESS" }, { conclusion: "FAILURE" }], reviewDecision: "CHANGES_REQUESTED" }),
-    { kind: "pr", state: "merged", checks: "failing", review: "changes", branch: null });
+    { kind: "pr", state: "merged", checks: "failing", review: "changes", branch: null, conflicts: false });
   assert.equal(prStatus({ state: "OPEN", headRefName: "feature/x" }).branch, "feature/x");
+  assert.equal(prStatus({ state: "OPEN", mergeable: "CONFLICTING" }).conflicts, true);
   assert.equal(prStatus({ state: "CLOSED", statusCheckRollup: [] }).checks, null);
 });
 
@@ -27,6 +28,7 @@ test("columnFor moves merged cards to done and open ones to test", () => {
 test("describe and numberFromUrl", () => {
   assert.equal(describe(42, { state: "open", checks: "passing", review: "approved" }), "#42 open · checks passing · approved");
   assert.equal(describe(7, { state: "draft", checks: null, review: null }), "#7 draft");
+  assert.equal(describe(8, { state: "open", conflicts: true, checks: "failing", review: null }), "#8 open · conflicts · checks failing");
   assert.equal(numberFromUrl("https://github.com/o/r/pull/12\n"), 12);
   assert.equal(numberFromUrl("nothing"), null);
 });

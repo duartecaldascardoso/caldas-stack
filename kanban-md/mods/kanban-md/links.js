@@ -3,9 +3,9 @@
 const FAILED = new Set(["FAILURE", "ERROR", "CANCELLED", "TIMED_OUT", "ACTION_REQUIRED", "STARTUP_FAILURE"]);
 const PASSED = new Set(["SUCCESS", "NEUTRAL", "SKIPPED"]);
 
-// From `gh pr view --json state,isDraft,reviewDecision,statusCheckRollup,headRefName`:
+// From `gh pr view --json state,isDraft,reviewDecision,statusCheckRollup,headRefName,mergeable`:
 // { state: "open" | "draft" | "merged" | "closed", checks: "passing" | "failing" | "pending" | null,
-//   review: "approved" | "changes" | null, branch: its head branch or null }.
+//   review: "approved" | "changes" | null, branch: its head branch or null, conflicts }.
 export function prStatus(pr) {
   const state = pr.state === "MERGED" ? "merged" : pr.state === "CLOSED" ? "closed" : pr.isDraft ? "draft" : "open";
   // Check runs report a conclusion once completed; commit statuses report a state.
@@ -15,7 +15,7 @@ export function prStatus(pr) {
     : results.every((r) => PASSED.has(r)) ? "passing"
     : "pending";
   const review = pr.reviewDecision === "APPROVED" ? "approved" : pr.reviewDecision === "CHANGES_REQUESTED" ? "changes" : null;
-  return { kind: "pr", state, checks, review, branch: pr.headRefName ?? null };
+  return { kind: "pr", state, checks, review, branch: pr.headRefName ?? null, conflicts: pr.mergeable === "CONFLICTING" };
 }
 
 // From `gh issue view --json state,stateReason,url`: { kind: "issue", state: "open" | "closed",
@@ -39,6 +39,7 @@ export function columnFor(status, col, { test = 3, done = 4 } = {}) {
 export function describe(number, status) {
   if (status.kind === "issue") return `issue #${number} ${status.completed === false && status.state === "closed" ? "closed, not planned" : status.state}`;
   const parts = [`#${number} ${status.state}`];
+  if (status.conflicts) parts.push("conflicts");
   if (status.checks) parts.push(`checks ${status.checks}`);
   if (status.review) parts.push(status.review === "approved" ? "approved" : "changes requested");
   return parts.join(" · ");
