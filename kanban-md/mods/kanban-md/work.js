@@ -37,6 +37,28 @@ export function taskFor(text, issue, pstack) {
   return `/pstack:poteto-mode ${playbook ? `${playbook} playbook. ` : ""}${task}`;
 }
 
+// Babysitting a card's pull request, as pstack's Babysit playbook does it: `drive` runs it to
+// merge-ready when something blocks it, `check` is one status pass and a report. The blockers
+// come in the playbook's order: conflicts, then review, then checks. Null unless it is open.
+export function babysitFor(number, status) {
+  if (status?.kind !== "pr" || (status.state !== "open" && status.state !== "draft")) return null;
+  const blockers = [
+    status.conflicts && "conflicts",
+    status.review === "changes" && "changes requested",
+    status.checks === "failing" && "checks failing",
+  ].filter(Boolean);
+  return { number, mode: blockers.length ? "drive" : "check", blockers };
+}
+
+// The babysitter's first message: the Babysit playbook with pstack, else its rules spelled out.
+export function babysitTask({ number, mode, blockers }, text, pstack) {
+  const { title } = playbookOf(text);
+  const why = blockers.length ? ` (${blockers.join(", ")})` : "";
+  if (pstack) return `/pstack:poteto-mode Babysit playbook, ${mode} mode. Pull request #${number}${why}: ${title}`;
+  if (mode === "check") return `Check on pull request #${number}: ${title}. Report its checks, review threads and whether it can merge. Change nothing.`;
+  return `Get pull request #${number} merge-ready${why}: ${title}. Report conflicts instead of rebasing, answer review comments, fix only checks the diff broke, and don't merge.`;
+}
+
 // Whether Claude Code has pstack, from ~/.claude/plugins/installed_plugins.json: the official
 // plugin (pstack@cursor-plugins) or a port (pstack@pstack-claude).
 export function hasPstack(installed) {
