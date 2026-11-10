@@ -7,7 +7,8 @@ import {
   addCard, editCard, removeCard, shiftCard, reorderCard, cardLinks, withoutLinks, withLink,
 } from "./board.js";
 import { prStatus, issueStatus, columnFor, describe, numberFromUrl } from "./links.js";
-import { branchFor, worktreePath, cardBranch, agentsByBranch, finished, checkoutOf, playbookOf, taskFor, hasPstack, babysitFor, babysitTask } from "./work.js";
+import { branchFor, worktreePath, cardBranch, agentsByBranch, finished, checkoutOf, playbookOf, taskFor, hasPstack, babysitFor, babysitTask, playbookNamed, PLAYBOOK_LIST } from "./work.js";
+import { parseRuns, recordPlaybook, progress, LOOP, stationOf, lastMessage, ago } from "./runs.js";
 import { LINE_H, PAD_Y, CHIPS_H, CHIPS_GAP, CHIPS_ROW_GAP, CHIP_GAP, CARD_GAP, INPUT_H, wrapText, cardHeight, chipLayout } from "./cards.js";
 
 const TEXT_SIZE = 13;
@@ -34,16 +35,17 @@ const KEYS = {
   "cmd-z": "undo", "cmd-shift-z": "redo",
   "[": "prev-board", "shift-tab": "prev-board", "]": "next-board", "tab": "next-board",
   "b": "new-board", "p": "project-board", "shift-d": "delete-board", "escape": "close",
-  "g": "open-diff", "shift-2": "link", "@": "link", "o": "open-pr", "s": "start-work", "shift-b": "babysit",
+  "g": "open-diff", "shift-2": "link", "@": "link", "o": "open-pr", "s": "start-work", "shift-b": "babysit", "i": "inspect", "?": "help", "shift-/": "help",
   "1": "column-1", "2": "column-2", "3": "column-3", "4": "column-4", "5": "column-5",
 };
 
-const HINTS = [["←→↑↓", "move"], ["⇧", "move card"], ["n", "new"], ["e", "edit"], ["d", "delete"], ["⌘Z", "undo"], ["[ ]", "board"], ["b", "new board"], ["⇧D", "delete board"]];
+const HINTS = [["?", "how it works"], ["←→↑↓", "move"], ["⇧", "move card"], ["n", "new"], ["e", "edit"], ["d", "delete"], ["⌘Z", "undo"], ["[ ]", "board"], ["b", "new board"], ["⇧D", "delete board"]];
 // Each column's dot, from the theme's palette.
 const COLUMN_TINTS = ["ansi5", "ansi4", "ansi3", "ansi6", "ansi2"];
 const alpha = (color, hex) => (/^#[0-9a-f]{6}$/i.test(color) ? color + hex : color);
 
 const fileOf = (board) => `${DIR}/${board}.md`;
+const runsOf = (board) => `${DIR}/.runs/${board}.json`; // what agents report about their playbooks
 
 function storedBoard() {
   try { return localStorage.getItem("board"); } catch { return null; }
@@ -55,6 +57,7 @@ function storeBoard(board) {
 
 export default class Kanban extends View {
   init(_props, cx) {
+    this.inspecting = props()?.view === "help" ? "help" : null; // opened straight into How it works
     this.boards = [];
     this.board = storedBoard() ?? DEFAULT_BOARD;
     this.project = null; // the focused terminal's git repository name, if any
@@ -70,6 +73,9 @@ export default class Kanban extends View {
     this.confirmingPr = null; // { col, row, branch, repo, title } waiting for y
     this.confirmingStart = null; // { col, row, card, branch, repo, agent } waiting for y
     this.confirmingBabysit = null; // { card, branch, repo, agent, pstack, sit } waiting for y
+    // this.inspecting: "card" (the selected card's run) or "help" (the loop and every playbook), set above.
+    this.detail = null; // the inspected card's { branch, message, commits }
+    this.runs = {};
     this.agentsBefore = agentsByBranch(agents(), panes());
     this.statuses = new Map(); // "<repo>#<number>" -> prStatus
 
@@ -119,6 +125,8 @@ export default class Kanban extends View {
     if (!this.boards.includes(this.board)) this.board = this.boards[0];
 
     const text = await readTextFile(fileOf(this.board));
+    this.runs = parseRuns(await readTextFile(runsOf(this.board)).catch(() => null));
+    if (this.inspecting === "card") await this.loadDetail();
     if (text === null || text !== this.raw) {
       this.raw = text;
       this.lanes = parse(text);
@@ -293,6 +301,11 @@ export default class Kanban extends View {
       cx.stop_propagation();
       return;
     }
+    if (this.inspecting) {
+      if (["escape", "i", "?", "shift-/"].includes(event.keystroke)) { this.inspecting = null; cx.notify(); }
+      cx.stop_propagation();
+      return;
+    }
     const action = KEYS[event.keystroke];
     if (!action) return;
     this.perform(action, cx);
@@ -329,6 +342,13 @@ export default class Kanban extends View {
       case "open-pr": return this.askPullRequest(cx);
       case "start-work": return this.askStartWork(cx);
       case "babysit": return this.askBabysit(cx);
+      case "inspect":
+        if (lanes[col][row] == null) return;
+        this.inspecting = "card";
+        this.detail = null;
+        cx.spawn(async (cx) => { await this.loadDetail(); cx.notify(); });
+        return cx.notify();
+      case "help": this.inspecting = "help"; return cx.notify();
       case "close": return props()?.overlay && closeOverlay(props().overlay);
       default: {
         const column = action.match(/^column-(\d)$/);
@@ -568,6 +588,8 @@ export default class Kanban extends View {
       if (!folder) return;
       const title = withoutLinks(card);
       run("space.new", { name: playbookOf(title).title.slice(0, 40), folder, argv: agent.run, task: taskFor(title, issue, pstack) });
+      const { playbook } = playbookOf(title);
+      if (playbook) await this.recordRun(branch, playbook);
       const wip = COLUMNS.indexOf("WIP");
       const linked = cardLinks(card)?.branch ? card : withLink(card, `@${branch}`);
       const lanes = this.lanes.map((lane) => [...lane]);
@@ -611,8 +633,50 @@ export default class Kanban extends View {
       const folder = await this.checkout(repo, branch);
       if (!folder) return;
       run("space.new", { name: `Babysit #${sit.number}`, folder, argv: agent.run, task: babysitTask(sit, withoutLinks(card), pstack) });
+      await this.recordRun(branch, "Babysit");
       notify({ title: `Babysitting #${sit.number}`, body: `${agent.name ?? "Agent"} on ${branch}, ${sit.mode}`, level: "success", timeout: 3000 });
     });
+  }
+
+  // Runs: the playbook a card's agent follows and the steps it reported (`kanban step`).
+
+  // The board names the playbook when it starts an agent, so its steps show at once.
+  async recordRun(branch, playbook) {
+    const path = runsOf(this.board);
+    await exec("mkdir", ["-p", `${DIR}/.runs`]);
+    const text = await readTextFile(path).catch(() => null);
+    const runs = recordPlaybook(parseRuns(text), branch, playbook, new Date().toISOString());
+    // An agent that wrote meanwhile wins; its next step brings the playbook back anyway.
+    await writeTextFile(path, JSON.stringify(runs, null, 2), text).then(() => { this.runs = runs; }, () => {});
+  }
+
+  // A card's run and its playbook: { run, book, planned }. Without a run, the playbook its
+  // prefix picks is planned.
+  runOf(card) {
+    const branch = this.branchOf(card);
+    const run = branch ? this.runs[branch] ?? null : null;
+    const book = playbookNamed(run?.playbook) ?? playbookNamed(playbookOf(withoutLinks(card)).playbook);
+    return { run, book, planned: !run?.playbook };
+  }
+
+  // The inspected card's agent's last message (from its Claude Code transcript) and the commits
+  // on its branch.
+  async loadDetail() {
+    const card = this.lanes[this.col][this.rows[this.col]];
+    const branch = card != null ? this.branchOf(card) : null;
+    const repo = this.repoFor(this.board);
+    if (!branch || !repo) { this.detail = null; return; }
+    const agent = this.agentOf(card);
+    let message = null;
+    if (agent?.cwd) {
+      // Claude Code keeps a folder's sessions in ~/.claude/projects/<folder, / and . as ->.
+      const dir = `${home()}/.claude/projects/${agent.cwd.replace(/[/.]/g, "-")}`;
+      const newest = (await exec("ls", ["-t", dir]).catch(() => null))?.stdout.split("\n").find((f) => f.endsWith(".jsonl"));
+      if (newest) message = lastMessage((await exec("tail", ["-n", "400", `${dir}/${newest}`]).catch(() => null))?.stdout);
+    }
+    const base = (await exec("git", ["-C", repo, "symbolic-ref", "--short", "refs/remotes/origin/HEAD"]).catch(() => null))?.stdout.trim() || "HEAD";
+    const count = await exec("git", ["-C", repo, "rev-list", "--count", `${base}..${branch}`]).catch(() => null);
+    this.detail = { branch, message, commits: count?.code === 0 ? Number(count.stdout.trim()) : null };
   }
 
   // Agents by branch, read live: render runs again whenever Herdr's agents change.
@@ -650,7 +714,8 @@ export default class Kanban extends View {
       .size_full().px(18).pt(16).pb(12).gap(14).bg(t.canvas).text_color(t.foreground).text_size(13)
       .when(Boolean(font), (el) => el.font_family(font))
       .child(this.renderTop(t))
-      .child(h_flex().flex_1().min_h(0).gap(12).children(COLUMNS.map((name, c) => this.renderColumn(t, name, c))))
+      .child(this.inspecting ? this.renderInspector(t)
+        : h_flex().flex_1().min_h(0).gap(12).children(COLUMNS.map((name, c) => this.renderColumn(t, name, c))))
       .child(this.renderHint(t))
       // Measures the font's character width, which card wrapping is computed from.
       .child(div().id("probe").absolute().top(-100).left(0).opacity(0).whitespace_nowrap().text_size(TEXT_SIZE)
@@ -794,6 +859,11 @@ export default class Kanban extends View {
       out.push(chip({ ring: false, color }, [[`#${ref.n}`, done ? t.muted : t.foreground], ...(st ? [[st.state, t.dim]] : []), ...(checks ? [checks] : []), ...(review ? [review] : [])]));
     }
     if (links.branch) out.push(chip(null, [[`⎇ ${links.branch}`, done ? t.dim : t.muted]]));
+    const { run, book } = this.runOf(card);
+    if (run && book) {
+      const at = progress(run, book.steps.length);
+      out.push(chip(null, [[`${at.done}/${book.steps.length}`, done ? t.muted : t.foreground], [at.current ? book.steps[at.current - 1][0] : "done", t.dim]]));
+    }
     return out;
   }
 
@@ -831,6 +901,7 @@ export default class Kanban extends View {
   // Keys as keycaps. Asks and the selected card's state come first, in words.
   renderHint(t) {
     const line = h_flex().h(22).gap(14).items_center().text_size(11.5).text_color(t.dim);
+    if (this.inspecting) return line.child(this.keys(t, [["esc", "back to the board"]]));
     if (this.confirmingDelete) {
       return line.child(div().text_color(t.blocked).child(`Delete board "${this.board}"?`)).child(this.keys(t, [["y", "delete"], ["any key", "cancel"]]));
     }
@@ -859,6 +930,7 @@ export default class Kanban extends View {
     const linked = card == null || !repo ? []
       : [
         ...(links?.pr || branch ? [["g", "open diff"]] : links?.issue ? [["g", "open issue"]] : []),
+        ["i", "inspect"],
         ...(!this.agentOf(card) ? [["s", "start work"]] : []),
         ...(!branch ? [["@", "link branch"]] : []),
         ...(!links?.pr ? [["o", "open pull request"]] : []),
@@ -872,6 +944,97 @@ export default class Kanban extends View {
         .child(this.agentMark(t, agent)).child(`${agent.name ?? "Agent"} ${doing[agent.status] ?? agent.status}`)))
       .when(Boolean(status), (el) => el.child(div().text_color(t.muted).child(describe(ref.n, status))))
       .child(this.keys(t, [...offer, ...linked, ...HINTS]));
+  }
+
+  // The inspector: in place of the columns, the selected card's place on the loop and its
+  // playbook's steps as the agent reported them (i), or the loop and every playbook (?).
+  renderInspector(t) {
+    const card = this.inspecting === "card" ? this.lanes[this.col][this.rows[this.col]] : null;
+    const panel = v_flex().id("inspector").flex_1().min_h(0).overflow_y_scroll().gap(20).px(22).py(18)
+      .rounded(10).border_1().border_color(t.border).bg(t.raised);
+    if (card == null) {
+      return panel
+        .child(v_flex().gap(4).child(div().text_size(16).font_semibold().child("How it works"))
+          .child(div().text_color(t.muted).whitespace_normal().child("A card goes around this loop. Herdr runs the board and the agents; pstack's playbooks tell the agent how to work.")))
+        .child(this.renderLoop(t, null))
+        .child(div().text_size(14).font_semibold().child("Playbooks"))
+        .child(h_flex().flex_wrap().gap(14).items_start().children(PLAYBOOK_LIST.map((book) =>
+          v_flex().w(300).gap(6).p(12).rounded(8).border_1().border_color(t.border).bg(t.canvas)
+            .child(h_flex().gap(8).items_center().child(div().font_semibold().child(book.playbook))
+              .child(div().text_color(t.ansi6).text_size(11.5).child(book.words.length ? book.words.map((w) => `${w}:`).join(" ") : "⇧B on a PR")))
+            .child(this.renderSteps(t, book, null))
+            .child(div().text_size(11.5).text_color(t.ansi2).whitespace_normal().child(`Ends with: ${book.ends}`)))));
+    }
+    const { run, book, planned } = this.runOf(card);
+    const agent = this.agentOf(card);
+    const links = this.linksOf(card);
+    const detail = this.detail?.branch === this.branchOf(card) ? this.detail : null;
+    const station = stationOf(this.col, { working: Boolean(agent || run?.playbook), playbook: run?.playbook });
+    const at = book && run ? progress(run, book.steps.length) : null;
+    const facts = [
+      ...(links?.pr?.status ? [describe(links.pr.n, links.pr.status)] : []),
+      ...(detail?.commits != null ? [`${detail.commits} commit${detail.commits === 1 ? "" : "s"} on the branch`] : []),
+      ...(run?.at ? [`updated ${ago(run.at)}${ago(run.at) === "just now" ? "" : " ago"}`] : []),
+    ];
+    return panel
+      .child(v_flex().gap(8).child(div().text_size(16).font_semibold().whitespace_normal().child(withoutLinks(card)))
+        .when(Boolean(cardLinks(card)), (el) => el.child(this.renderChips(t, card, false))))
+      .child(this.renderLoop(t, station))
+      .child(h_flex().gap(28).items_start()
+        .child(v_flex().flex_1().min_w(0).gap(10)
+          .child(h_flex().gap(10).items_center()
+            .child(div().text_size(14).font_semibold().child(book ? `${book.playbook} playbook` : "No playbook yet"))
+            .when(Boolean(at), (el) => el.child(div().text_color(t.muted).child(`${at.done}/${book.steps.length}`)))
+            .when(Boolean(book && planned), (el) => el.child(div().text_color(t.dim).child(this.col <= 1 ? "starts with s" : "not reported yet"))))
+          .child(book ? this.renderSteps(t, book, run) : div().text_color(t.muted).whitespace_normal()
+            .child("Start the card with bug:, feat:, perf:, refactor:, spike: or investigate: to pick one, or let poteto-mode pick and report it with `kanban playbook`."))
+          .when(Boolean(book), (el) => el.child(div().text_size(12).text_color(t.ansi2).whitespace_normal().child(`Ends with: ${book.ends}`))))
+        .child(v_flex().w(340).flex_none().gap(10)
+          .child(div().text_size(14).font_semibold().child("Agent"))
+          .child(agent
+            ? h_flex().gap(8).items_center().child(this.agentMark(t, agent))
+              .child(`${agent.name} ${{ working: "is working", blocked: "needs you", done: "is ready for review", idle: "is idle" }[agent.status] ?? agent.status}`)
+            : div().text_color(t.muted).child(this.col <= 1 ? "None yet: s starts one." : "None on this branch now."))
+          .when(Boolean(detail?.message), (el) => el.child(v_flex().gap(4).p(10).rounded(6).bg(t.canvas).border_1().border_color(t.border)
+            .child(div().text_size(11).text_color(t.dim).child(`Last message${detail.message.at ? `, ${ago(detail.message.at)}${ago(detail.message.at) === "just now" ? "" : " ago"}` : ""}`))
+            .child(div().text_size(12).text_color(t.muted).whitespace_normal()
+              .child(detail.message.text.length > 700 ? `${detail.message.text.slice(0, 700)}…` : detail.message.text))))
+          .children(facts.map((fact) => div().text_size(12).text_color(t.muted).child(fact)))));
+  }
+
+  // The six stations in a row; `current` (an index) is highlighted. Without one, each station
+  // says what you, the board and the agent do there.
+  renderLoop(t, current) {
+    const who = [["you", t.ansi3], ["board", t.ansi6], ["agent", t.ansi5]];
+    return h_flex().gap(8).items_start().children(LOOP.map((stop, i) => {
+      const here = i === current;
+      const box = v_flex().flex_1().min_w(0).gap(4).px(10).py(8).rounded(8).border_1()
+        .border_color(here ? t.accent : t.border).bg(here ? t.selected : t.canvas)
+        .child(h_flex().gap(6).items_center().child(div().text_size(11).text_color(t.dim).child(String(i + 1)))
+          .child(div().font_semibold().text_color(current === null || here ? t.foreground : t.muted).child(stop.name)));
+      if (current !== null) return box;
+      return box.children(who.filter(([key]) => stop[key]).map(([key, color]) =>
+        h_flex().gap(6).items_start().text_size(11.5)
+          .child(div().w(40).flex_none().text_color(color).child(key))
+          .child(div().flex_1().min_w(0).text_color(t.muted).whitespace_normal().child(stop[key]))));
+    }));
+  }
+
+  // A playbook's steps: ✓ done, – skipped, ● the one in hand, ○ to do, with the agent's notes.
+  renderSteps(t, book, run) {
+    const at = run ? progress(run, book.steps.length) : null;
+    return v_flex().gap(5).children(book.steps.map(([label, step], i) => {
+      const n = i + 1;
+      const s = run?.steps?.[n];
+      const [mark, color] = s?.status === "done" ? ["✓", t.ansi2] : s?.status === "skipped" ? ["–", t.dim]
+        : at?.current === n ? ["●", t.accent] : ["○", t.dim];
+      return v_flex().gap(1)
+        .child(h_flex().gap(8).items_start()
+          .child(div().w(12).flex_none().text_color(color).child(mark))
+          .child(div().w(84).flex_none().text_color(at?.current === n ? t.foreground : t.muted).child(label))
+          .child(div().flex_1().min_w(0).text_color(s?.status === "skipped" ? t.dim : t.foreground).whitespace_normal().child(step)))
+        .when(Boolean(s?.note), (el) => el.child(div().pl(104).text_size(11.5).text_color(t.muted).whitespace_normal().child(s.note)));
+    }));
   }
 
   keys(t, pairs) {

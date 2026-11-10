@@ -15,7 +15,7 @@ My development environment: a plain-text kanban board to plan work, and a native
 
 1. **Plan:** a card on the project's board (`⌘⇧K`), or `kanban add` from any terminal.
 2. **Start:** `s` on a card makes a worktree and branch for it and starts an agent with the card as its task, through a pstack playbook when Claude Code has pstack.
-3. **Follow:** the card shows its agent working, blocked or ready; when it finishes, a toast opens its diff.
+3. **Follow:** the card shows its agent working, blocked or ready, and the playbook step it's on; `i` shows every step and the agent's last message. When it finishes, a toast opens its diff.
 4. **Review:** comment on lines and **Send to agent**, or post the review to GitHub; `o` on the board opens the pull request, and `⇧B` sets an agent on it until it's merge-ready.
 5. **Iterate:** the viewer says when comments are addressed, and **N new commits since your review** shows only what changed.
 6. **Ship:** the card moves to test when its pull request opens and to done when it merges.
@@ -40,6 +40,7 @@ Five columns: ideas, todo, wip, test, done. Every board is a markdown file in `~
 - **Project boards:** a board named after a git repository opens first inside it, and `p` creates one for the current project.
 - **Start work:** `s` makes a worktree on `feature/<card>` (in `~/.herdr/worktrees`, where Herdr nests it under the repository), opens a space there with your agent and the card as its first task, links the card to the branch and moves it to wip. With [pstack](https://github.com/cursor/plugins/tree/main/pstack) in Claude Code (`/plugin marketplace add cursor/plugins`, then `/plugin install pstack@cursor-plugins`), the agent works the card through `/pstack:poteto-mode`. Start a card with `bug:`, `perf:`, `refactor:`, `spike:`, `investigate:` or `feat:` to pick the playbook and the branch (`bug: login fails` is the Bug fix playbook on `fix/login-fails`); without one, poteto-mode picks.
 - **Babysit:** `⇧B` on a card with an open pull request starts an agent in its branch's checkout to get it merge-ready: conflicts reported, review comments answered, checks the diff broke fixed, never merged. With pstack it runs the Babysit playbook, in `drive` mode when conflicts, requested changes or failing checks block the pull request, else `check` for one status pass.
+- **Inspect a card:** `i` shows where the card is on the loop and its playbook's steps as the agent reports them (done, in hand, skipped, with notes), next to the agent's last message, the pull request and the commits on its branch. The card itself shows `4/8 verify`. `?` shows how it works: the loop, who does what at each station, and every playbook's steps.
 - **Agents on cards:** a card shows the agent on its branch (working, blocked, ready, idle). While the board is open, an agent that finishes says the card is ready for review; the toast opens its diff.
 - **Links:** `#42` links a card to pull request or issue 42 (GitHub says which; `issue #34` and `PR #42` say it outright) and `@branch` to a branch. A card can have several. It shows a pull request's state (open, draft, merged, closed), checks and review, and an issue's state.
 - **Cards follow GitHub:** opening a pull request moves its card to test, merging it or completing the issue moves it to done.
@@ -53,6 +54,8 @@ Five columns: ideas, todo, wip, test, done. Every board is a markdown file in `~
 | `@` | Link the card to its branch's pull request, or the branch |
 | `g` | Open the card's pull request or branch in snappy-diff, or its issue in the browser |
 | `s` | Start work: a worktree, a branch and an agent for the card (asks first) |
+| `i` | Inspect the card: its place on the loop, its playbook's steps, its agent's last message |
+| `?` | How it works: the loop and every playbook |
 | `⇧B` | Babysit the card's pull request to merge-ready (asks first) |
 | `o` | Push the card's branch and open a pull request titled like the card, closing its issue (asks first) |
 | `⌘Z` / `⌘⇧Z` | Undo / redo |
@@ -69,6 +72,11 @@ kanban add todo Pricing page
 kanban move pricing wip         # a card by number, or a unique part of its text
 kanban link 3 #42               # or "issue #34", or @feature/pricing
 kanban done 3
+
+# an agent, inside its branch's checkout
+kanban playbook bug             # the pstack playbook it follows
+kanban step 2 now "narrowing to the 3s re-read"   # now, done or skipped, with a note
+kanban run                      # the steps and where it stands
 ```
 
 ## snappy-diff
