@@ -15,6 +15,7 @@ const TEXT_SIZE = 13;
 // Card text sits inside: the column's border, the list's 8px sides, the card's border and 12px sides.
 const CARD_INSET = 2 + 16 + 2 + 24;
 // Room the agent's status takes at the end of a card's first line: Herdr's own marks.
+const TRACK_LABEL = 84; // the you / board / agent labels in How it works
 const markWidth = (agent) => (!agent ? 0 : agent.status === "blocked" ? 76 : 20);
 
 const DIR = `${home()}/kanban`;
@@ -97,6 +98,7 @@ export default class Kanban extends View {
       await this.refresh(cx);
       if (this.boards.includes(this.project)) this.openBoard(this.project, cx);
       await this.syncStatuses(cx);
+      if (props()?.view === "inspect") await this.inspectCard(props().card, cx);
     });
     cx.timer.every(POLL_MS, (cx) => { if (!this.editing) cx.spawn((cx) => this.refresh(cx)); });
     cx.timer.every(STATUS_MS, (cx) => { if (!this.editing) cx.spawn((cx) => this.syncStatuses(cx)); });
@@ -302,7 +304,17 @@ export default class Kanban extends View {
       return;
     }
     if (this.inspecting) {
-      if (["escape", "i", "?", "shift-/"].includes(event.keystroke)) { this.inspecting = null; cx.notify(); }
+      const action = KEYS[event.keystroke];
+      if (["escape", "i", "?", "shift-/"].includes(event.keystroke)) this.inspecting = null;
+      else if (this.inspecting === "help" && (action === "up" || action === "down")) {
+        this.helpIndex = ((this.helpIndex ?? 0) + (action === "up" ? -1 : 1) + PLAYBOOK_LIST.length) % PLAYBOOK_LIST.length;
+      } else if (this.inspecting === "card" && ["up", "down", "left", "right"].includes(action)) {
+        // Other cards: the inspector follows the cursor.
+        this.perform(action, cx);
+        this.detail = null;
+        cx.spawn(async (cx) => { await this.loadDetail(); cx.notify(); });
+      }
+      cx.notify();
       cx.stop_propagation();
       return;
     }
@@ -659,6 +671,20 @@ export default class Kanban extends View {
     return { run, book, planned: !run?.playbook };
   }
 
+  // Opens the inspector on the first card whose text holds `query`, for a mod opened with props
+  // { view: "inspect", card }.
+  async inspectCard(query, cx) {
+    await this.refresh(cx);
+    const q = String(query ?? "").toLowerCase();
+    const col = this.lanes.findIndex((lane) => lane.some((c) => c.toLowerCase().includes(q)));
+    if (!q || col < 0) return;
+    this.col = col;
+    this.rows[col] = this.lanes[col].findIndex((c) => c.toLowerCase().includes(q));
+    this.inspecting = "card";
+    await this.loadDetail();
+    cx.notify();
+  }
+
   // The inspected card's agent's last message (from its Claude Code transcript) and the commits
   // on its branch.
   async loadDetail() {
@@ -901,7 +927,8 @@ export default class Kanban extends View {
   // Keys as keycaps. Asks and the selected card's state come first, in words.
   renderHint(t) {
     const line = h_flex().h(22).gap(14).items_center().text_size(11.5).text_color(t.dim);
-    if (this.inspecting) return line.child(this.keys(t, [["esc", "back to the board"]]));
+    if (this.inspecting === "help") return line.child(this.keys(t, [["↑↓", "playbook"], ["esc", "back to the board"]]));
+    if (this.inspecting) return line.child(this.keys(t, [["←→↑↓", "other cards"], ["esc", "back to the board"]]));
     if (this.confirmingDelete) {
       return line.child(div().text_color(t.blocked).child(`Delete board "${this.board}"?`)).child(this.keys(t, [["y", "delete"], ["any key", "cancel"]]));
     }
@@ -949,92 +976,179 @@ export default class Kanban extends View {
   // The inspector: in place of the columns, the selected card's place on the loop and its
   // playbook's steps as the agent reported them (i), or the loop and every playbook (?).
   renderInspector(t) {
-    const card = this.inspecting === "card" ? this.lanes[this.col][this.rows[this.col]] : null;
-    const panel = v_flex().id("inspector").flex_1().min_h(0).overflow_y_scroll().gap(20).px(22).py(18)
+    const panel = v_flex().id("inspector").flex_1().min_h(0).overflow_y_scroll().gap(22).px(28).py(24)
       .rounded(10).border_1().border_color(t.border).bg(t.raised);
-    if (card == null) {
-      return panel
-        .child(v_flex().gap(4).child(div().text_size(16).font_semibold().child("How it works"))
-          .child(div().text_color(t.muted).whitespace_normal().child("A card goes around this loop. Herdr runs the board and the agents; pstack's playbooks tell the agent how to work.")))
-        .child(this.renderLoop(t, null))
-        .child(div().text_size(14).font_semibold().child("Playbooks"))
-        .child(h_flex().flex_wrap().gap(14).items_start().children(PLAYBOOK_LIST.map((book) =>
-          v_flex().w(300).gap(6).p(12).rounded(8).border_1().border_color(t.border).bg(t.canvas)
-            .child(h_flex().gap(8).items_center().child(div().font_semibold().child(book.playbook))
-              .child(div().text_color(t.ansi6).text_size(11.5).child(book.words.length ? book.words.map((w) => `${w}:`).join(" ") : "⇧B on a PR")))
-            .child(this.renderSteps(t, book, null))
-            .child(div().text_size(11.5).text_color(t.ansi2).whitespace_normal().child(`Ends with: ${book.ends}`)))));
-    }
+    return this.inspecting === "help" ? this.renderHelp(t, panel) : this.renderCardRun(t, panel);
+  }
+
+  // A small uppercase heading over a section.
+  label(t, text) {
+    return div().text_size(10.5).font_medium().text_color(t.dim).child(text.toUpperCase());
+  }
+
+  renderHelp(t, panel) {
+    const book = PLAYBOOK_LIST[this.helpIndex ?? 0];
+    const who = [["You", t.ansi3, "you"], ["Board", t.ansi6, "board"], ["Agent", t.ansi5, "agent"]];
+    return panel
+      .child(v_flex().gap(6)
+        .child(div().text_size(18).font_semibold().child("How it works"))
+        .child(div().text_color(t.muted).whitespace_normal().child("A card goes around this loop. Herdr runs the board and the agents; pstack's playbooks tell the agent how to work.")))
+      .child(v_flex().gap(0)
+        .child(this.renderTrack(t, null))
+        .children(who.map(([name, color, key]) => h_flex().items_stretch().border_t(1).border_color(t.border)
+          .child(h_flex().w(TRACK_LABEL).flex_none().gap(8).items_center().py(10)
+            .child(div().size(7).rounded_full().bg(color)).child(div().text_size(12).font_medium().text_color(color).child(name)))
+          .children(LOOP.map((stop) => div().flex_1().min_w(0).px(10).py(10).text_size(11.5).line_height(17)
+            .text_color(stop[key] ? t.muted : t.dim).whitespace_normal().child(stop[key] ?? "·"))))))
+      .child(v_flex().gap(10)
+        .child(this.label(t, "Playbooks"))
+        .child(h_flex().items_stretch().rounded(8).border_1().border_color(t.border).bg(t.canvas)
+          .child(v_flex().w(230).flex_none().py(6).border_r(1).border_color(t.border).children(PLAYBOOK_LIST.map((b, i) => {
+            const on = b === book;
+            return v_flex().px(14).py(8).gap(2).border_l(2).border_color(on ? t.accent : t.canvas).when(on, (el) => el.bg(t.selected))
+              .child(div().font_medium().text_color(on ? t.foreground : t.muted).child(b.playbook))
+              .child(div().text_size(11).text_color(t.dim).child(b.words.length ? b.words.map((w) => `${w}:`).join("  ") : "⇧B on a pull request"));
+          })))
+          .child(v_flex().flex_1().min_w(0).gap(16).px(22).py(18)
+            .child(v_flex().gap(6)
+              .child(h_flex().gap(10).items_center().child(div().text_size(16).font_semibold().child(book.playbook))
+                .child(div().text_size(11.5).text_color(t.dim).child(`${book.steps.length} steps`)))
+              .child(this.renderEnds(t, book)))
+            .child(this.renderSteps(t, book, null)))));
+  }
+
+  renderCardRun(t, panel) {
+    const card = this.lanes[this.col][this.rows[this.col]];
+    if (card == null) return panel.child(div().text_color(t.muted).child("No card selected."));
     const { run, book, planned } = this.runOf(card);
     const agent = this.agentOf(card);
     const links = this.linksOf(card);
-    const detail = this.detail?.branch === this.branchOf(card) ? this.detail : null;
+    const branch = this.branchOf(card);
+    const detail = this.detail?.branch === branch ? this.detail : null;
     const station = stationOf(this.col, { working: Boolean(agent || run?.playbook), playbook: run?.playbook });
     const at = book && run ? progress(run, book.steps.length) : null;
+    const since = (iso) => { const a = ago(iso); return a && (a === "just now" ? a : `${a} ago`); };
+    const doing = { working: "is working", blocked: "needs you", done: "is ready for review", idle: "is idle" };
+    const pr = links?.pr;
+    const prColor = { open: t.ansi2, draft: t.dim, merged: t.ansi5, closed: t.ansi1 }[pr?.status?.state] ?? t.dim;
     const facts = [
-      ...(links?.pr?.status ? [describe(links.pr.n, links.pr.status)] : []),
-      ...(detail?.commits != null ? [`${detail.commits} commit${detail.commits === 1 ? "" : "s"} on the branch`] : []),
-      ...(run?.at ? [`updated ${ago(run.at)}${ago(run.at) === "just now" ? "" : " ago"}`] : []),
+      ["Station", LOOP[station].name],
+      ["Branch", branch ?? "none yet"],
+      ["Pull request", pr ? (pr.status ? describe(pr.n, pr.status) : `#${pr.n}`) : "none yet"],
+      ...(detail?.commits != null ? [["Commits", `${detail.commits} on the branch`]] : []),
+      ...(run?.at ? [["Updated", since(run.at)]] : []),
     ];
     return panel
-      .child(v_flex().gap(8).child(div().text_size(16).font_semibold().whitespace_normal().child(withoutLinks(card)))
-        .when(Boolean(cardLinks(card)), (el) => el.child(this.renderChips(t, card, false))))
-      .child(this.renderLoop(t, station))
+      .child(v_flex().gap(10)
+        .child(div().text_size(18).font_semibold().whitespace_normal().child(withoutLinks(card)))
+        .child(h_flex().flex_wrap().gap(18).items_center().text_size(12).text_color(t.muted)
+          .when(Boolean(book), (el) => el.child(h_flex().gap(6).items_center().child(div().size(7).rounded_full().bg(t.ansi5)).child(`${book.playbook} playbook`)))
+          .when(Boolean(branch), (el) => el.child(`⎇ ${branch}`))
+          .when(Boolean(pr), (el) => el.child(h_flex().gap(6).items_center().child(div().size(7).rounded_full().bg(prColor))
+            .child(pr.status ? describe(pr.n, pr.status) : `#${pr.n}`)))
+          .when(Boolean(agent), (el) => el.child(h_flex().gap(6).items_center().child(this.agentMark(t, agent))
+            .child(`${agent.name} ${doing[agent.status] ?? agent.status}`)))))
+      .child(this.renderTrack(t, station))
       .child(h_flex().gap(28).items_start()
-        .child(v_flex().flex_1().min_w(0).gap(10)
-          .child(h_flex().gap(10).items_center()
-            .child(div().text_size(14).font_semibold().child(book ? `${book.playbook} playbook` : "No playbook yet"))
-            .when(Boolean(at), (el) => el.child(div().text_color(t.muted).child(`${at.done}/${book.steps.length}`)))
-            .when(Boolean(book && planned), (el) => el.child(div().text_color(t.dim).child(this.col <= 1 ? "starts with s" : "not reported yet"))))
-          .child(book ? this.renderSteps(t, book, run) : div().text_color(t.muted).whitespace_normal()
-            .child("Start the card with bug:, feat:, perf:, refactor:, spike: or investigate: to pick one, or let poteto-mode pick and report it with `kanban playbook`."))
-          .when(Boolean(book), (el) => el.child(div().text_size(12).text_color(t.ansi2).whitespace_normal().child(`Ends with: ${book.ends}`))))
-        .child(v_flex().w(340).flex_none().gap(10)
-          .child(div().text_size(14).font_semibold().child("Agent"))
-          .child(agent
-            ? h_flex().gap(8).items_center().child(this.agentMark(t, agent))
-              .child(`${agent.name} ${{ working: "is working", blocked: "needs you", done: "is ready for review", idle: "is idle" }[agent.status] ?? agent.status}`)
-            : div().text_color(t.muted).child(this.col <= 1 ? "None yet: s starts one." : "None on this branch now."))
-          .when(Boolean(detail?.message), (el) => el.child(v_flex().gap(4).p(10).rounded(6).bg(t.canvas).border_1().border_color(t.border)
-            .child(div().text_size(11).text_color(t.dim).child(`Last message${detail.message.at ? `, ${ago(detail.message.at)}${ago(detail.message.at) === "just now" ? "" : " ago"}` : ""}`))
-            .child(div().text_size(12).text_color(t.muted).whitespace_normal()
-              .child(detail.message.text.length > 700 ? `${detail.message.text.slice(0, 700)}…` : detail.message.text))))
-          .children(facts.map((fact) => div().text_size(12).text_color(t.muted).child(fact)))));
+        .child(v_flex().flex_1().min_w(0).gap(16)
+          .child(v_flex().gap(8)
+            .child(h_flex().justify_between().items_center()
+              .child(this.label(t, book ? (planned ? "Playbook, planned" : "Playbook") : "Playbook"))
+              .when(Boolean(at), (el) => el.child(div().text_size(12).text_color(t.muted)
+                .child(at.current ? `${at.done} of ${book.steps.length} · ${book.steps[at.current - 1][0]}` : `all ${book.steps.length} done`))))
+            .child(book ? this.renderBar(t, book, run) : div()))
+          .child(book ? this.renderSteps(t, book, run) : this.renderNoPlaybook(t))
+          .when(Boolean(book), (el) => el.child(this.renderEnds(t, book)))
+          .when(Boolean(book && planned), (el) => el.child(div().text_size(11.5).text_color(t.dim).whitespace_normal()
+            .child(this.col <= 1 ? "Steps fill in once s starts an agent and it reports them." : "The agent hasn't reported a step yet."))))
+        .child(v_flex().w(360).flex_none().gap(18)
+          .child(v_flex().gap(8)
+            .child(h_flex().justify_between().items_center().child(this.label(t, "Latest from the agent"))
+              .when(Boolean(detail?.message?.at), (el) => el.child(div().text_size(11).text_color(t.dim).child(since(detail.message.at)))))
+            .child(detail?.message
+              ? div().pl(12).pr(10).py(8).border_l(2).border_color(t.accent).bg(t.canvas).rounded_r(6).text_size(12)
+                .line_height(18).text_color(t.foreground).whitespace_normal()
+                .child(detail.message.text.length > 600 ? `${detail.message.text.slice(0, 600)}…` : detail.message.text)
+              : div().text_size(12).text_color(t.dim).whitespace_normal()
+                .child(agent ? "Nothing yet, or this agent keeps no Claude Code transcript." : this.col <= 1 ? "No agent yet. s starts one." : "No agent on this branch now.")))
+          .child(v_flex().gap(0).child(this.label(t, "Details")).child(div().h(6))
+            .children(facts.map(([k, v]) => h_flex().justify_between().gap(12).py(7).border_b(1).border_color(t.border).text_size(12)
+              .child(div().flex_none().text_color(t.dim).child(k))
+              .child(div().min_w(0).truncate().text_color(t.muted).child(v)))))));
   }
 
-  // The six stations in a row; `current` (an index) is highlighted. Without one, each station
-  // says what you, the board and the agent do there.
-  renderLoop(t, current) {
-    const who = [["you", t.ansi3], ["board", t.ansi6], ["agent", t.ansi5]];
-    return h_flex().gap(8).items_start().children(LOOP.map((stop, i) => {
-      const here = i === current;
-      const box = v_flex().flex_1().min_w(0).gap(4).px(10).py(8).rounded(8).border_1()
-        .border_color(here ? t.accent : t.border).bg(here ? t.selected : t.canvas)
-        .child(h_flex().gap(6).items_center().child(div().text_size(11).text_color(t.dim).child(String(i + 1)))
-          .child(div().font_semibold().text_color(current === null || here ? t.foreground : t.muted).child(stop.name)));
-      if (current !== null) return box;
-      return box.children(who.filter(([key]) => stop[key]).map(([key, color]) =>
-        h_flex().gap(6).items_start().text_size(11.5)
-          .child(div().w(40).flex_none().text_color(color).child(key))
-          .child(div().flex_1().min_w(0).text_color(t.muted).whitespace_normal().child(stop[key]))));
+  // The six stations as a track: numbered nodes joined by a line, the columns matching the
+  // you / board / agent rows under them. With `current`, earlier stations are passed (✓).
+  renderTrack(t, current) {
+    return h_flex().items_center().pb(12)
+      .child(div().w(current === null ? TRACK_LABEL : 0).flex_none())
+      .children(LOOP.map((stop, i) => {
+        const here = i === current;
+        const passed = current !== null && i < current;
+        const node = div().size(22).flex_none().rounded_full().flex().items_center().justify_center().text_size(11).font_semibold()
+          .border_1().border_color(here ? t.accent : passed ? t.ansi2 : t.border)
+          .bg(here ? t.accent : t.canvas).text_color(here ? t.accent_foreground ?? t.canvas : passed ? t.ansi2 : t.muted)
+          .child(passed ? "✓" : String(i + 1));
+        return h_flex().flex_1().min_w(0).items_center().gap(8).px(current === null ? 10 : 0)
+          .child(node)
+          .child(div().flex_none().font_medium().text_color(here ? t.foreground : passed ? t.muted : current === null ? t.foreground : t.dim).child(stop.name))
+          .child(i < LOOP.length - 1 ? div().flex_1().h(1).mx(6).bg(passed ? alpha(t.ansi2, "80") : t.border) : div().flex_1());
+      }));
+  }
+
+  // One segment a step: done green, skipped faint, the one in hand accent, to do a border line.
+  renderBar(t, book, run) {
+    const at = run ? progress(run, book.steps.length) : null;
+    return h_flex().gap(3).children(book.steps.map((_, i) => {
+      const s = run?.steps?.[i + 1]?.status;
+      const color = s === "done" ? t.ansi2 : s === "skipped" ? alpha(t.dim, "80") : at?.current === i + 1 ? t.accent : t.border;
+      return div().flex_1().h(5).rounded(3).bg(color);
     }));
   }
 
-  // A playbook's steps: ✓ done, – skipped, ● the one in hand, ○ to do, with the agent's notes.
+  // A playbook's steps as a timeline: a node per step on a rail, its label and step, and the
+  // agent's note under it. ✓ done, – skipped, the one in hand ringed and tagged "now".
   renderSteps(t, book, run) {
     const at = run ? progress(run, book.steps.length) : null;
-    return v_flex().gap(5).children(book.steps.map(([label, step], i) => {
+    const last = book.steps.length - 1;
+    return v_flex().children(book.steps.map(([label, step], i) => {
       const n = i + 1;
-      const s = run?.steps?.[n];
-      const [mark, color] = s?.status === "done" ? ["✓", t.ansi2] : s?.status === "skipped" ? ["–", t.dim]
-        : at?.current === n ? ["●", t.accent] : ["○", t.dim];
-      return v_flex().gap(1)
-        .child(h_flex().gap(8).items_start()
-          .child(div().w(12).flex_none().text_color(color).child(mark))
-          .child(div().w(84).flex_none().text_color(at?.current === n ? t.foreground : t.muted).child(label))
-          .child(div().flex_1().min_w(0).text_color(s?.status === "skipped" ? t.dim : t.foreground).whitespace_normal().child(step)))
-        .when(Boolean(s?.note), (el) => el.child(div().pl(104).text_size(11.5).text_color(t.muted).whitespace_normal().child(s.note)));
+      const status = run?.steps?.[n]?.status ?? (at?.current === n ? "now" : null);
+      const note = run?.steps?.[n]?.note;
+      const now = status === "now";
+      const node = status === "done"
+        ? div().size(16).rounded_full().bg(t.ansi2).flex().items_center().justify_center().text_size(10).text_color(t.canvas).child("✓")
+        : status === "skipped"
+          ? div().size(16).rounded_full().border_1().border_color(t.dim).flex().items_center().justify_center().text_size(10).text_color(t.dim).child("–")
+          : now
+            ? div().size(16).rounded_full().border(2).border_color(t.accent).flex().items_center().justify_center().child(div().size(6).rounded_full().bg(t.accent))
+            : div().size(16).rounded_full().border_1().border_color(t.border).flex().items_center().justify_center().text_size(9.5).text_color(t.dim).child(String(n));
+      const lineColor = status === "done" || status === "skipped" ? alpha(t.ansi2, "60") : t.border;
+      return h_flex().items_stretch().gap(12)
+        .child(v_flex().w(16).flex_none().items_center()
+          .child(div().mt(2).child(node))
+          .child(i < last ? div().w(1.5).flex_1().bg(lineColor) : div()))
+        .child(v_flex().flex_1().min_w(0).gap(3).pb(i < last ? 14 : 0)
+          .child(h_flex().gap(8).items_center()
+            .child(div().font_medium().text_color(now ? t.foreground : status === "done" ? t.foreground : status === "skipped" ? t.dim : t.muted).child(label))
+            .when(now, (el) => el.child(div().px(6).h(16).flex().items_center().rounded(4).bg(alpha(t.accent, "33")).text_size(10).text_color(t.accent).child("now"))))
+          .child(div().text_size(12).text_color(status === "skipped" ? t.dim : t.muted).whitespace_normal().child(step))
+          .when(Boolean(note), (el) => el.child(div().mt(2).pl(8).border_l(2).border_color(t.border).text_size(11.5).text_color(t.muted).whitespace_normal().child(note))));
     }));
+  }
+
+  renderEnds(t, book) {
+    return h_flex().gap(8).items_start().text_size(12)
+      .child(div().flex_none().text_color(t.ansi2).child("Ends with"))
+      .child(div().flex_1().min_w(0).text_color(t.muted).whitespace_normal().child(book.ends));
+  }
+
+  renderNoPlaybook(t) {
+    return v_flex().gap(10).p(14).rounded(8).border_1().border_color(t.border).bg(t.canvas)
+      .child(div().text_color(t.muted).whitespace_normal().child("No playbook yet. Start the card with a word to pick one, or let poteto-mode pick and report it with `kanban playbook`."))
+      .child(h_flex().flex_wrap().gap(6).children(PLAYBOOK_LIST.filter((b) => b.words.length).map((b) =>
+        h_flex().gap(6).px(8).h(22).items_center().rounded(5).border_1().border_color(t.border).text_size(11.5)
+          .child(div().text_color(t.foreground).child(`${b.words[0]}:`)).child(div().text_color(t.dim).child(b.playbook)))));
   }
 
   keys(t, pairs) {
