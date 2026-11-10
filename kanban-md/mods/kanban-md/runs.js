@@ -87,3 +87,33 @@ export function ago(iso, now = Date.now()) {
   if (min < 60 * 24) return `${Math.floor(min / 60)} h`;
   return `${Math.floor(min / 60 / 24)} d`;
 }
+
+// An agent's message, organised for a narrow column: { lead, points, more, question }. The lead
+// is its first paragraph, the points its first bullets, `more` what's left out, and the question
+// the last paragraph that asks one. Markdown marks, code blocks, tables and headings go.
+export function summarize(text, { points: max = 4, lead: leadMax = 240, point: pointMax = 140 } = {}) {
+  const clean = (s) => s.replace(/\[([^\]]+)\]\([^)]+\)/g, "$1").replace(/\*\*|__|`/g, "").replace(/\s+/g, " ").trim();
+  const cut = (s, n) => (s.length > n ? `${s.slice(0, n - 1).trimEnd()}…` : s);
+  const paragraphs = [];
+  const bullets = [];
+  let fence = false;
+  let last = null; // "para" or "bullet": what a following line continues
+  for (const raw of String(text ?? "").split("\n")) {
+    const line = raw.trim();
+    if (line.startsWith("```")) { fence = !fence; last = null; continue; }
+    if (fence || !line || line.startsWith("#") || line.startsWith("|") || /^[-*_]{3,}$/.test(line)) { last = null; continue; }
+    const bullet = line.match(/^(?:[-*•]|\d+[.)])\s+(.*)$/);
+    if (bullet) { bullets.push(clean(bullet[1])); last = "bullet"; }
+    else if (last === "bullet" && raw !== raw.trimStart()) bullets[bullets.length - 1] += ` ${clean(line)}`;
+    else if (last === "para") paragraphs[paragraphs.length - 1] += ` ${line}`;
+    else { paragraphs.push(line); last = "para"; }
+  }
+  const paras = paragraphs.map(clean).filter(Boolean);
+  const asks = paras.filter((s) => s.endsWith("?"));
+  return {
+    lead: paras.length ? cut(paras[0], leadMax) : null,
+    points: bullets.slice(0, max).map((b) => cut(b, pointMax)),
+    more: Math.max(0, bullets.length - max) + Math.max(0, paras.length - 1),
+    question: asks.length ? cut(asks[asks.length - 1], leadMax) : null,
+  };
+}
