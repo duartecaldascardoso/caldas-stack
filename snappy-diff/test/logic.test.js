@@ -307,3 +307,21 @@ test("pullRequestList puts reviews asked of you first and drafts last", async ()
   ], "me");
   assert.deepEqual(rows.map((r) => [r.number, r.hint]), [[3, "your review · @bob"], [2, "yours"], [1, "draft · @ann"]]);
 });
+
+test("openThreads keeps open review threads that point at a line", async () => {
+  const { openThreads, threadsAsComments } = await import("../mods/snappy-diff/review.js");
+  const response = { data: { repository: { pullRequest: { reviewThreads: { nodes: [
+    { id: "T1", isResolved: false, isOutdated: false, path: "src/app.js", line: 3, startLine: null, diffSide: "RIGHT",
+      comments: { nodes: [{ author: { login: "ann" }, body: "Why 3? " }, { author: { login: "me" }, body: "Spec says so." }] } },
+    { id: "T2", isResolved: true, isOutdated: false, path: "src/app.js", line: 2, diffSide: "LEFT", comments: { nodes: [] } },
+    { id: "T3", isResolved: false, isOutdated: true, path: "src/app.js", line: null, diffSide: "RIGHT", comments: { nodes: [] } },
+    { id: "T4", isResolved: false, isOutdated: false, path: "src/app.js", line: 7, startLine: 5, diffSide: "LEFT", comments: { nodes: [{ author: null, body: "x" }] } },
+  ] } } } } };
+  const threads = openThreads(response);
+  assert.deepEqual(threads.map((t) => [t.id, t.side, t.start, t.end]), [["T1", "new", 3, 3], ["T4", "old", 5, 7]]);
+  assert.deepEqual(threads[0].comments, [{ author: "ann", body: "Why 3?" }, { author: "me", body: "Spec says so." }]);
+  assert.equal(threads[1].comments[0].author, "ghost");
+  const [comment] = threadsAsComments(threads.slice(0, 1), parsePatch(PATCH));
+  assert.equal(comment.file, "src/app.js");
+  assert.equal(comment.text, "@ann on GitHub: Why 3?\n\n@me on GitHub: Spec says so.");
+});

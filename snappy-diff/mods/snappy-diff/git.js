@@ -155,3 +155,25 @@ export async function churn(repo, base, head) {
   for (const path of out.split("\n").filter(Boolean)) counts.set(path, (counts.get(path) ?? 0) + 1);
   return counts;
 }
+
+// A pull request's review threads, through GitHub's GraphQL API and gh's sign-in.
+const THREADS = `query($owner: String!, $name: String!, $number: Int!) {
+  repository(owner: $owner, name: $name) { pullRequest(number: $number) { reviewThreads(first: 100) { nodes {
+    id isResolved isOutdated path line startLine diffSide
+    comments(first: 30) { nodes { author { login } body } }
+  } } } } }`;
+
+export async function reviewThreads(repo, number) {
+  const where = await exec("gh", ["repo", "view", "--json", "owner,name", "--jq", '.owner.login + "/" + .name'], { cwd: repo }).catch(() => null);
+  const [owner, name] = (where?.stdout ?? "").trim().split("/");
+  if (!owner || !name) return null;
+  const result = await exec("gh", ["api", "graphql", "-f", `query=${THREADS}`, "-F", `owner=${owner}`, "-F", `name=${name}`, "-F", `number=${number}`], { cwd: repo }).catch(() => null);
+  if (result?.code !== 0) return null;
+  try { return JSON.parse(result.stdout); } catch { return null; }
+}
+
+export async function resolveThread(repo, id) {
+  const mutation = "mutation($id: ID!) { resolveReviewThread(input: { threadId: $id }) { thread { isResolved } } }";
+  const result = await exec("gh", ["api", "graphql", "-f", `query=${mutation}`, "-F", `id=${id}`], { cwd: repo }).catch(() => null);
+  return result?.code === 0;
+}

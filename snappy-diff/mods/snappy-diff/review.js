@@ -96,3 +96,29 @@ export function reviewPrompt(subject, comments, files) {
   });
   return out.join("\n");
 }
+
+// A pull request's review threads, from GitHub's GraphQL `reviewThreads`: the open ones that
+// still point at a line, each { id, path, side: "old" | "new", start, end, comments: [{ author, body }] }.
+export function openThreads(response) {
+  const nodes = response?.data?.repository?.pullRequest?.reviewThreads?.nodes ?? [];
+  return nodes
+    .filter((t) => !t.isResolved && !t.isOutdated && t.line != null)
+    .map((t) => ({
+      id: t.id,
+      path: t.path,
+      side: t.diffSide === "LEFT" ? "old" : "new",
+      start: t.startLine ?? t.line,
+      end: t.line,
+      comments: (t.comments?.nodes ?? []).map((c) => ({ author: c.author?.login ?? "ghost", body: (c.body ?? "").trim() })),
+    }));
+}
+
+// Threads as comments, for the agent prompt: anchored to their file and lines, the
+// conversation as the text.
+export function threadsAsComments(threads, files) {
+  const byName = new Map(files.map((f) => [f.name, f]));
+  return threads.filter((t) => byName.has(t.path)).map((t) => ({
+    id: t.id, file: byName.get(t.path).id, side: t.side, start: t.start, end: t.end, code: null,
+    text: t.comments.map((c) => `@${c.author} on GitHub: ${c.body}`).join("\n\n"),
+  }));
+}

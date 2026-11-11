@@ -10,7 +10,7 @@ import { fileRows, wrapCount, wrapLines, segments } from "./rows.js";
 import { treeRows, fileMatches, breakdown } from "./tree.js";
 import { findMoves, isMoved } from "./moved.js";
 import { areas, effort, hints, reviewOrder, pullRequestList } from "./insights.js";
-import { reviewKey, rangeKey, sinceReview, emptyReview, isViewed, changedSinceViewed, toggleViewed, linesText, withStatus, reviewPrompt, reviewPayload } from "./review.js";
+import { reviewKey, rangeKey, sinceReview, emptyReview, isViewed, changedSinceViewed, toggleViewed, linesText, withStatus, reviewPrompt, reviewPayload, openThreads, threadsAsComments } from "./review.js";
 import { DEFAULT_PREFS, readPrefs, writePrefs, readReview, writeReview, readLastReviewed, writeLastReviewed } from "./store.js";
 
 const ICONS = "mods/snappy-diff/icons";
@@ -23,6 +23,8 @@ const TREE_ROW_H = 28;
 const SIDEBAR_W = 288;
 const SCROLLBAR_W = 12;
 const COMMENT_LINE_H = 18;
+const THREAD_LINES = 12; // a thread comment's lines shown before "more on GitHub"
+const THREAD_CHROME = 16 + 2 + 20 + 26; // row padding, border, card padding, header
 const TOOLBAR_H = 48;
 const MENU_LIST_H = 320;
 const EDITOR_H = 96;
@@ -88,6 +90,7 @@ export default class SnappyDiff extends View {
     this.editing = null; // the comment being written: { id, file, side, start, end }
     this.pr = null; // the pull request under review, with the head ref it was fetched to
     this.lastReviewed = {}; // range -> the head commit last reviewed there
+    this.threads = []; // the pull request's open review threads on GitHub
     this.overview = false;
     this.overviewPrefix = ""; // the folder the overview's "where" panel is in
     this.churn = new Map(); // path -> commits of the range that touched it
@@ -148,6 +151,7 @@ export default class SnappyDiff extends View {
     this.pr = { ...pr, head };
     const prBase = `origin/${pr.baseRefName}`;
     if (this.source.head === head && this.source.base === base && prBase !== base && this.refs.includes(prBase)) await this.load({ ...this.source, base: prBase }, cx);
+    else this.loadThreads(cx);
     cx.notify();
   }
 
@@ -209,6 +213,54 @@ export default class SnappyDiff extends View {
     this.rebuild();
     cx.notify();
     if (this.prefs.wholeFiles) this.loadWholeFiles(cx);
+    this.loadThreads(cx);
+  }
+
+  // The open review threads of the pull request on screen, from GitHub.
+  loadThreads(cx) {
+    if (!this.prShown()) {
+      if (this.threads.length) { this.threads = []; this.rebuild(); cx.notify(); }
+      return;
+    }
+    const { repo } = this.source;
+    const number = this.pr.number;
+    cx.spawn(async (cx) => {
+      const threads = openThreads(await git.reviewThreads(repo, number));
+      if (!this.prShown() || this.pr.number !== number) return;
+      this.threads = threads;
+      this.rebuild();
+      cx.notify();
+    });
+  }
+
+  resolveThread(thread, cx) {
+    cx.spawn(async (cx) => {
+      if (!(await git.resolveThread(this.source.repo, thread.id))) {
+        notify({ title: "Couldn't resolve the thread", body: "Is the GitHub CLI (gh) signed in with access to this repository?", level: "error" });
+        return;
+      }
+      this.threads = this.threads.filter((t) => t.id !== thread.id);
+      this.rebuild();
+      cx.notify();
+    });
+  }
+
+  // A thread card's lines, in the code font at `cols` characters: each comment's author, then its
+  // text, long ones cut short.
+  threadLines(thread, cols) {
+    const lines = [];
+    thread.comments.forEach((comment, i) => {
+      if (i) lines.push({ kind: "gap", text: "" });
+      lines.push({ kind: "author", text: `@${comment.author}` });
+      const body = comment.body.split("\n").flatMap((para) => wrapLines(para, cols).map(([a, b]) => para.slice(a, b)));
+      for (const text of body.slice(0, THREAD_LINES)) lines.push({ kind: "text", text });
+      if (body.length > THREAD_LINES) lines.push({ kind: "more", text: `… ${body.length - THREAD_LINES} more lines on GitHub` });
+    });
+    return lines;
+  }
+
+  threadCols() {
+    return Math.max(20, Math.floor((this.metrics().width - 64) / this.charW));
   }
 
   // Whole files: every file's text, with every separator open. Files too big, binary, new or
@@ -338,6 +390,8 @@ export default class SnappyDiff extends View {
       if (this.isCollapsed(f)) continue;
       const notes = new Map();
       for (const c of this.comments) if (c.file === f.id && !c.outdated) notes.set(`${c.side}:${c.end}`, [...(notes.get(`${c.side}:${c.end}`) ?? []), c]);
+      const threads = new Map();
+      for (const th of this.threads) if (th.path === f.name) threads.set(`${th.side}:${th.end}`, [...(threads.get(`${th.side}:${th.end}`) ?? []), th]);
       for (const row of this.rowsFor(f)) {
         if (row.t === "hunk") { push({ ...row, f }, HUNK_H); continue; }
         if (row.t === "notice") { push({ ...row, f }, NOTICE_H); continue; }
@@ -347,6 +401,9 @@ export default class SnappyDiff extends View {
         push({ ...row, f }, lines * LINE_H);
         // Comments and the open editor go under the last line they are on.
         for (const [side, n] of this.rowSides(row)) {
+          for (const th of threads.get(`${side}:${n}`) ?? []) {
+            push({ t: "thread", th, f }, THREAD_CHROME + this.threadLines(th, this.threadCols()).length * COMMENT_LINE_H);
+          }
           for (const c of notes.get(`${side}:${n}`) ?? []) {
             if (c.id === this.editing?.id) continue;
             push({ t: "comment", c, f }, 52 + wrapCount(c.text, commentCols) * COMMENT_LINE_H);
@@ -573,8 +630,28 @@ export default class SnappyDiff extends View {
       .sort((a, b) => (b.pane.branch === branch) - (a.pane.branch === branch) || b.agent.seq - a.agent.seq);
   }
 
+  // Scrolls to the next GitHub thread below the top of the view, round to the first.
+  nextThread(cx) {
+    const at = this.items.map((item, i) => (item.t === "thread" ? i : -1)).filter((i) => i >= 0);
+    if (!at.length) {
+      // A thread on a folded file: unfold the files that have threads, then look again.
+      for (const th of this.threads) { const f = this.files.find((x) => x.name === th.path); if (f) this.open.set(f.id, true); }
+      this.rebuild();
+      return cx.notify();
+    }
+    const next = at.find((i) => i > this.topIndex + 1) ?? at[0];
+    this.topIndex = next;
+    this.scroll.scroll_to_item(next, "center");
+    cx.notify();
+  }
+
+  // Your open comments and GitHub's open threads: what an agent is asked to address.
+  reviewItems() {
+    return [...this.comments.filter((c) => !c.outdated), ...threadsAsComments(this.threads, this.files)];
+  }
+
   sendToAgent(cx, chosen) {
-    const open = this.comments.filter((c) => !c.outdated);
+    const open = this.reviewItems();
     if (!open.length) return;
     const candidates = this.reviewAgents();
     if (!chosen && candidates.length > 1) return this.openMenu("agent", cx);
@@ -902,6 +979,10 @@ export default class SnappyDiff extends View {
     // Comment cards: 16px row padding, a 1px border and 10px card padding before the buttons,
     // which are fixed-width and right-aligned (renderComment, renderEditor).
     const inCard = fromRight - 27;
+    if (item.t === "thread") {
+      if (inCard >= 0 && inCard < 70) return this.resolveThread(item.th, cx);
+      return;
+    }
     if (item.t === "comment") {
       if (inCard >= 0 && inCard < 54) return this.deleteComment(item.c.id, cx);
       if (inCard >= 54 && inCard < 108) return this.editComment(item.c, cx);
@@ -970,7 +1051,7 @@ export default class SnappyDiff extends View {
     const add = files.reduce((n, f) => n + f.add, 0);
     const del = files.reduce((n, f) => n + f.del, 0);
     const viewed = files.filter((f) => isViewed(this.review, f)).length;
-    const openComments = this.comments.filter((c) => !c.outdated).length;
+    const openComments = this.reviewItems().length;
     const picker = (name, label, mono = true) => {
       const trigger = h_flex().id(`pick-${name}`).h(28).px(10).gap(8).items_center().rounded(6).border_1().border_color(t.border)
         .cursor_pointer().hover((st) => st.bg(t.hover)).flex_none()
@@ -1013,6 +1094,10 @@ export default class SnappyDiff extends View {
           .on_mouse_down("left", (e) => this.pressAt(e)).on_click((_e, cx) => this.openMenu("kinds", cx))
           .child(div().text_color(t.ansi2).child(`+${add.toLocaleString()}`)).child(div().text_color(t.ansi1).child(`−${del.toLocaleString()}`)))
         .when(this.ms != null, (el) => el.child(`${this.ms} ms`))))
+      .when(this.threads.length > 0, (el) => el.child(h_flex().id("threads").h(28).px(10).gap(6).items_center().rounded(6).cursor_pointer()
+        .text_size(12).text_color(t.foreground).bg(alpha(t.ansi4, "22")).hover((st) => st.bg(alpha(t.ansi4, "33")))
+        .on_click((_e, cx) => this.nextThread(cx))
+        .child(icon("comment", 12)).child(plural(this.threads.length, "thread"))))
       .when(openComments > 0, (el) => el
         .child(h_flex().id("send-agent").h(28).px(10).gap(6).items_center().rounded_l(6).border_1().border_color(t.border)
           .cursor_pointer().text_size(12).hover((st) => st.bg(t.hover))
@@ -1164,6 +1249,7 @@ export default class SnappyDiff extends View {
     }
     if (item.t === "notice") return row.items_center().px(16).text_color(t.dim).child(item.text);
     if (item.t === "comment") return this.renderComment(t, item.c);
+    if (item.t === "thread") return this.renderThread(t, item.th, code);
     if (item.t === "editor") return this.renderEditor(t, item.e);
     const m = this.metrics();
     if (item.t === "split") {
@@ -1269,6 +1355,23 @@ export default class SnappyDiff extends View {
       cx.stop_propagation();
       if (e.bounds) this.pressHeader(f, this.headerPart(unzoom(e.bounds.x + e.bounds.width - e.position.x)), cx);
     });
+  }
+
+  // A GitHub review thread under its line: whose it is, the conversation, and Resolve.
+  renderThread(t, thread, code) {
+    const lines = this.threadLines(thread, this.threadCols());
+    const range = thread.start === thread.end ? `Line ${thread.end}` : `Lines ${thread.start}–${thread.end}`;
+    return h_flex().w_full().px(16).py(8).bg(alpha(t.ansi4, "0d"))
+      .child(v_flex().flex_1().min_w(0).p(10).rounded(8).border_1().border_color(alpha(t.ansi4, "66")).bg(t.popover)
+        .child(h_flex().h(26).gap(8).items_center().text_size(11.5).text_color(t.dim)
+          .child(div().text_color(t.ansi4).child(icon("pull", 12)))
+          .child(div().text_color(t.foreground).child("GitHub"))
+          .child(div().flex_1().child(`${range} · ${plural(thread.comments.length, "comment")}`))
+          .child(div().w(64).flex().justify_end().text_color(t.muted).child("Resolve")))
+        .children(lines.map((line) => div().h(COMMENT_LINE_H).flex().items_center().whitespace_nowrap().text_size(12.5)
+          .when(Boolean(code), (el) => el.font_family(code))
+          .text_color(line.kind === "author" ? t.ansi4 : line.kind === "more" ? t.dim : t.foreground)
+          .child(line.text))));
   }
 
   renderComment(t, c) {
