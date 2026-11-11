@@ -297,3 +297,13 @@ test("insights: areas, effort, hints and review order", async () => {
   assert.deepEqual(hints(files, new Map()).map((h) => h.id), ["deps", "tests"]);
   assert.deepEqual(reviewOrder(files).map((f) => f.name), ["src/api/types.ts", "src/app.js", "package.json", "README.md", "yarn.lock"]);
 });
+
+test("pullRequestList puts reviews asked of you first and drafts last", async () => {
+  const { pullRequestList } = await import("../mods/snappy-diff/insights.js");
+  const rows = pullRequestList([
+    { number: 1, title: "Draft thing", isDraft: true, author: { login: "ann" }, reviewRequests: [] },
+    { number: 2, title: "Mine", isDraft: false, author: { login: "me" }, reviewRequests: [] },
+    { number: 3, title: "Review me", isDraft: false, author: { login: "bob" }, reviewRequests: [{ login: "me" }] },
+  ], "me");
+  assert.deepEqual(rows.map((r) => [r.number, r.hint]), [[3, "your review · @bob"], [2, "yours"], [1, "draft · @ann"]]);
+});

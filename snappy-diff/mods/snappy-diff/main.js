@@ -9,7 +9,7 @@ import { languageOf } from "./syntax.js";
 import { fileRows, wrapCount, wrapLines, segments } from "./rows.js";
 import { treeRows, fileMatches, breakdown } from "./tree.js";
 import { findMoves, isMoved } from "./moved.js";
-import { areas, effort, hints, reviewOrder } from "./insights.js";
+import { areas, effort, hints, reviewOrder, pullRequestList } from "./insights.js";
 import { reviewKey, rangeKey, sinceReview, emptyReview, isViewed, changedSinceViewed, toggleViewed, linesText, withStatus, reviewPrompt, reviewPayload } from "./review.js";
 import { DEFAULT_PREFS, readPrefs, writePrefs, readReview, writeReview, readLastReviewed, writeLastReviewed } from "./store.js";
 
@@ -773,7 +773,26 @@ export default class SnappyDiff extends View {
 
   // Go to (cmd-k) and search (cmd-f)
 
+  // The repository's open pull requests, for go-to: fetched when it opens, at most once a minute.
+  loadPullRequests(cx) {
+    const repo = this.source?.repo;
+    if (!repo || (this.prsAt && Date.now() - this.prsAt < 60000 && this.prsRepo === repo)) return;
+    this.prsAt = Date.now();
+    this.prsRepo = repo;
+    cx.spawn(async (cx) => {
+      const gh = (args) => exec("gh", args, { cwd: repo }).catch(() => null);
+      const [list, me] = await Promise.all([
+        gh(["pr", "list", "--state", "open", "--limit", "50", "--json", "number,title,author,isDraft,reviewRequests"]),
+        this.me ? null : gh(["api", "user", "--jq", ".login"]),
+      ]);
+      if (me?.code === 0) this.me = me.stdout.trim();
+      try { this.prs = list?.code === 0 ? pullRequestList(JSON.parse(list.stdout), this.me) : []; } catch { this.prs = []; }
+      cx.notify();
+    });
+  }
+
   openPalette(mode, cx) {
+    if (mode === "all") this.loadPullRequests(cx);
     this.palette = this.palette === mode ? null : mode;
     this.paletteIndex = 0;
     this.paletteInput.set_value("");
@@ -826,7 +845,13 @@ export default class SnappyDiff extends View {
       ...(this.unsentComments().length ? [["Send comments to GitHub", "", (cx) => this.sendToGitHub(cx)]] : []),
     ].filter(([label]) => !query || label.toLowerCase().includes(query.toLowerCase()))
       .map(([label, hint, run]) => ({ label, hint: hint || "action", run }));
-    return [...files, ...commits, ...actions];
+    const shownPr = this.prShown() ? this.pr.number : null;
+    const prs = (this.prs ?? []).filter((p) => p.number !== shownPr)
+      .filter((p) => !query || `#${p.number} ${p.title}`.toLowerCase().includes(query.toLowerCase())).slice(0, 20)
+      .map((p) => ({ label: `#${p.number} ${p.title}`, hint: p.hint || "pull request", run: (cx) => cx.spawn((cx) => this.openPullRequest(this.source.repo, p.number, cx)) }));
+    // With nothing typed, pull requests asking for your review come first.
+    const asked = prs.filter((p) => p.hint.startsWith("your review"));
+    return query ? [...files, ...prs, ...commits, ...actions] : [...asked, ...files, ...prs.filter((p) => !asked.includes(p)), ...commits, ...actions];
   }
 
   paletteKey(k, cx) {

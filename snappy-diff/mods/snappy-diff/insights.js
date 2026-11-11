@@ -70,3 +70,18 @@ export function reviewOrder(files) {
   const rank = (f) => (f.generated ? 5 : CONTRACT.test(f.name) ? 0 : RANK[kindOf(f)]);
   return files.map((f, i) => ({ f, i, r: rank(f) })).sort((a, b) => a.r - b.r || a.i - b.i).map(({ f }) => f);
 }
+
+// Open pull requests for go-to, from `gh pr list --json number,title,author,isDraft,reviewRequests`:
+// the ones asking for your review first, then the rest, drafts last; each { number, title, hint }.
+export function pullRequestList(prs, me) {
+  const asked = (pr) => (pr.reviewRequests ?? []).some((r) => r.login && r.login === me);
+  const rank = (pr) => (asked(pr) ? 0 : pr.isDraft ? 2 : 1);
+  return prs
+    .map((pr, i) => ({ pr, i }))
+    .sort((a, b) => rank(a.pr) - rank(b.pr) || a.i - b.i)
+    .map(({ pr }) => ({
+      number: pr.number,
+      title: pr.title,
+      hint: [asked(pr) ? "your review" : pr.isDraft ? "draft" : null, pr.author?.login === me ? "yours" : pr.author?.login && `@${pr.author.login}`].filter(Boolean).join(" · "),
+    }));
+}
