@@ -44,7 +44,8 @@ Five columns that follow pstack's loop: Ideas (the backlog), Plan, Work, Review 
 - **Agents on cards:** a card shows the agent on its branch (working, blocked, ready, idle). While the board is open, an agent that finishes says the card is ready for review; the toast opens its diff.
 - **Links:** `#42` links a card to pull request or issue 42 (GitHub says which; `issue #34` and `PR #42` say it outright) and `@branch` to a branch. A card can have several. It shows a pull request's state (open, draft, merged, closed), checks and review, and an issue's state.
 - **Cards follow GitHub:** opening a pull request moves its card to Review, merging it or completing the issue moves it to Ship.
-- **Follows your theme**, with a done/total progress bar per board.
+- **Notes:** every board has a free notes page (`⇧N`, or **Notes** in the top bar) for decisions, links and whatever else; it saves as you type, at the end of the board's file under `## Notes`.
+- **Follows your theme**, with a progress bar per board.
 
 | Key | Action |
 | --- | --- |
@@ -60,6 +61,7 @@ Five columns that follow pstack's loop: Ideas (the backlog), Plan, Work, Review 
 | `o` | Push the card's branch and open a pull request titled like the card, closing its issue (asks first) |
 | `⌘Z` / `⌘⇧Z` | Undo / redo |
 | `[` `]` | Switch board |
+| `⇧N` | The board's notes (`esc` back to the cards) |
 | `b` / `p` / `⇧D` | New board, board for this project, delete board |
 
 ### The `kanban` command
@@ -72,6 +74,8 @@ kanban add plan Pricing page
 kanban move pricing work        # a card by number, or a unique part of its text
 kanban link 3 #42               # or "issue #34", or @feature/pricing
 kanban ship 3                   # done works too
+kanban note Ask legal about SAML
+kanban notes                    # the board's notes
 
 # an agent, inside its branch's checkout
 kanban playbook bug             # the pstack playbook it follows

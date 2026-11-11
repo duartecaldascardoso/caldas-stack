@@ -86,3 +86,12 @@ test("kanban records a branch's playbook and its steps beside the board", () => 
   const saved = JSON.parse(readFileSync(join(dir, ".runs", "app.json"), "utf8"));
   assert.equal(saved["fix/login"].steps[2].status, "now");
 });
+
+test("kanban keeps a board's notes and adds to them", () => {
+  const dir = mkdtempSync(join(tmpdir(), "kanban-"));
+  writeFileSync(join(dir, "demo.md"), "# demo\n\n## Plan\n- Fix login\n\n## Notes\n\nCustomers log in with SSO.\n");
+  kanban(dir, "move", "1", "work");
+  assert.match(board(dir), /## Work\n- Fix login\n[\s\S]*## Notes\n\nCustomers log in with SSO\.\n$/);
+  assert.equal(kanban(dir, "note", "Ask", "about", "SAML").out, "noted on demo: Ask about SAML");
+  assert.equal(kanban(dir, "notes").out, "Customers log in with SSO.\nAsk about SAML");
+});

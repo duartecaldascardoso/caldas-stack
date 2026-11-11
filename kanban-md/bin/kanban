@@ -5,7 +5,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync, readdirSync, readFileSync, renameSync, writeFileSync, mkdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, join } from "node:path";
-import { COLUMNS, columnIndex, parse, serialize, addCard, editCard, removeCard, withLink } from "../mods/kanban-md/board.js";
+import { COLUMNS, columnIndex, parse, serialize, notesOf, addCard, editCard, removeCard, withLink } from "../mods/kanban-md/board.js";
 import { playbookNamed, PLAYBOOK_LIST } from "../mods/kanban-md/work.js";
 import { STEP_STATUSES, parseRuns, recordPlaybook, recordStep, progress } from "../mods/kanban-md/runs.js";
 
@@ -21,6 +21,8 @@ const USAGE = `kanban: plain-text kanban boards in ${DIR.replace(homedir(), "~")
   kanban edit <card> <text>      change a card's text
   kanban link <card> <link>      link a card: #42 (pull request or issue), issue #34, @branch
   kanban rm <card>               delete a card
+  kanban notes                   the board's notes
+  kanban note <text>             add a line to the board's notes
 
   For the agent working on the current branch:
   kanban playbook <name>         the pstack playbook it follows: ${PLAYBOOK_LIST.map((p) => p.playbook).join(", ")}
@@ -86,9 +88,9 @@ function show(board, lanes) {
   return lines.join("\n");
 }
 
-// Writes through a temporary file, so the board never reads half a file.
-function save(path, board, lanes) {
-  write(path, serialize(board, lanes));
+// Writes through a temporary file, so the board never reads half a file. Notes are kept.
+function save(path, board, lanes, notes) {
+  write(path, serialize(board, lanes, notes));
 }
 
 function write(path, text) {
@@ -138,16 +140,26 @@ export function main(argv) {
   const runsFile = (name) => join(DIR, ".runs", `${name}.json`);
   const readRuns = (name) => parseRuns(existsSync(runsFile(name)) ? readFileSync(runsFile(name), "utf8") : "");
   const path = join(DIR, `${board}.md`);
-  const lanes = parse(existsSync(path) ? readFileSync(path, "utf8") : "");
+  const text = existsSync(path) ? readFileSync(path, "utf8") : "";
+  const lanes = parse(text);
+  const notes = notesOf(text);
   const change = (result, message) => {
     if (!result) fail("nothing changed");
-    save(path, board, result.lanes);
+    save(path, board, result.lanes, notes);
     return message;
   };
 
   switch (command) {
     case "show":
       return show(board, lanes);
+    case "notes":
+      return notes || `no notes on ${board} yet; add one with kanban note <text>`;
+    case "note": {
+      const line = rest.join(" ").trim();
+      if (!line) fail("give the note's text");
+      save(path, board, lanes, notes ? `${notes}\n${line}` : line);
+      return `noted on ${board}: ${line}`;
+    }
     case "add": {
       const [column, ...words] = rest;
       const col = columnOf(column);

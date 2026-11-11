@@ -17,12 +17,17 @@ export function emptyLanes() {
   return COLUMNS.map(() => []);
 }
 
+// Free notes close a board's file, under this heading, kept exactly as written.
+const NOTES = /^##\s+notes\s*$/i;
+
 // "## <column>" starts a lane (case-insensitive, old names too), "- " or "* " lines are its cards.
-// Anything else, including cards under an unknown heading, is ignored.
+// Anything else, including cards under an unknown heading, is ignored. "## Notes" ends the
+// columns: what follows is the board's notes, lists and headings included.
 export function parse(text) {
   const lanes = emptyLanes();
   let lane = -1;
   for (const line of (text ?? "").split("\n")) {
+    if (NOTES.test(line)) break;
     const heading = line.match(/^##\s+(.+?)\s*$/);
     if (heading) {
       lane = columnIndex(heading[1]);
@@ -34,9 +39,17 @@ export function parse(text) {
   return lanes;
 }
 
-export function serialize(title, lanes) {
+// The board's notes: everything after "## Notes", without the blank lines around it.
+export function notesOf(text) {
+  const lines = (text ?? "").split("\n");
+  const at = lines.findIndex((line) => NOTES.test(line));
+  return at < 0 ? "" : lines.slice(at + 1).join("\n").replace(/^\s*\n/, "").trimEnd();
+}
+
+export function serialize(title, lanes, notes = "") {
   const sections = COLUMNS.map((c, i) => `\n## ${c}\n` + lanes[i].map((card) => `- ${card}\n`).join(""));
-  return `# ${title}\n` + sections.join("");
+  const tail = notes.trim() ? `\n## Notes\n\n${notes.trimEnd()}\n` : "";
+  return `# ${title}\n` + sections.join("") + tail;
 }
 
 // A board's file name from what someone typed: no path separators, no leading dots.

@@ -1,9 +1,9 @@
 // kanban-md: plain-text kanban boards for Herdr, one markdown file per board in ~/kanban.
 import { View, div, svg } from "gpui-kit";
-import { v_flex, h_flex, InputState, Input, Scrollbar, v_virtual_list, VirtualListScrollHandle } from "gpui-base";
+import { v_flex, h_flex, InputState, Input, TextareaState, Textarea, Scrollbar, v_virtual_list, VirtualListScrollHandle } from "gpui-base";
 import { home, props, openOverlay, closeOverlay, readTextFile, writeTextFile, exec, focused, notify, run, agents, panes, knownAgents, settings, theme } from "herdr";
 import {
-  COLUMNS, emptyLanes, parse, serialize, boardName,
+  COLUMNS, emptyLanes, parse, serialize, notesOf, boardName,
   addCard, editCard, removeCard, shiftCard, reorderCard, cardLinks, withoutLinks, withLink,
 } from "./board.js";
 import { prStatus, issueStatus, columnFor, describe, numberFromUrl } from "./links.js";
@@ -29,6 +29,7 @@ const POLL_MS = 3000; // picks up edits made to the files elsewhere
 const STATUS_MS = 60000; // linked pull requests, through gh
 const AGENTS_MS = 2000; // agents finishing their work
 const HISTORY_LIMIT = 200;
+const NOTES_SAVE_MS = 600; // notes save this long after the last keystroke
 
 const KEYS = {
   "left": "left", "h": "left", "right": "right", "l": "right",
@@ -39,11 +40,11 @@ const KEYS = {
   "cmd-z": "undo", "cmd-shift-z": "redo",
   "[": "prev-board", "shift-tab": "prev-board", "]": "next-board", "tab": "next-board",
   "b": "new-board", "p": "project-board", "shift-d": "delete-board", "escape": "close",
-  "g": "open-diff", "shift-2": "link", "@": "link", "o": "open-pr", "s": "start-work", "shift-b": "babysit", "i": "inspect", "?": "help", "shift-/": "help",
+  "g": "open-diff", "shift-2": "link", "@": "link", "o": "open-pr", "s": "start-work", "shift-b": "babysit", "i": "inspect", "?": "help", "shift-/": "help", "shift-n": "notes",
   "1": "column-1", "2": "column-2", "3": "column-3", "4": "column-4", "5": "column-5",
 };
 
-const HINTS = [["?", "how it works"], ["←→↑↓", "move"], ["⇧", "move card"], ["n", "new"], ["e", "edit"], ["d", "delete"], ["⌘Z", "undo"], ["[ ]", "board"], ["b", "new board"], ["⇧D", "delete board"]];
+const HINTS = [["?", "how it works"], ["⇧N", "notes"], ["←→↑↓", "move"], ["⇧", "move card"], ["n", "new"], ["e", "edit"], ["d", "delete"], ["⌘Z", "undo"], ["[ ]", "board"], ["b", "new board"], ["⇧D", "delete board"]];
 // Each column's dot, from the theme's palette.
 const COLUMN_TINTS = ["ansi5", "ansi4", "ansi3", "ansi6", "ansi2"];
 const alpha = (color, hex) => (/^#[0-9a-f]{6}$/i.test(color) ? color + hex : color);
@@ -87,6 +88,14 @@ export default class Kanban extends View {
     this.scrolls = COLUMNS.map(() => VirtualListScrollHandle.new());
     this.columnW = 0; // measured
     this.charW = TEXT_SIZE * 0.6; // measured from the code font
+    // Free notes, one page per board, kept at the end of its file under "## Notes".
+    this.view = props()?.view === "notes" ? "notes" : "board";
+    this.notes = "";
+    this.notesPending = false; // typed but not saved yet: a refresh mustn't overwrite it
+    this.notesTyped = 0;
+    this.notesInput = TextareaState.new({ placeholder: "Notes for this board: decisions, links, what to remember…" });
+    this.notesInput.set_soft_wrap(true);
+    this.notesInput.on("change", (_e, cx) => this.typeNotes(cx));
     this.input = InputState.new({ placeholder: "" });
     this.input.on("submit", (_e, cx) => this.commitEdit(cx));
     this.handle = cx.focus_handle();
@@ -136,13 +145,14 @@ export default class Kanban extends View {
       this.raw = text;
       this.lanes = parse(text);
       this.clampRows();
+      if (!this.notesPending) this.showNotes(notesOf(text));
     }
     cx.notify();
   }
 
   save(cx) {
     const board = this.board;
-    const text = serialize(board, this.lanes);
+    const text = serialize(board, this.lanes, this.notes);
     const expected = this.raw;
     this.raw = text;
     cx.spawn(async (cx) => {
@@ -160,6 +170,12 @@ export default class Kanban extends View {
 
   openBoard(board, cx) {
     if (board === this.board) return;
+    // Notes typed a moment ago belong to the board they were typed on: save them first.
+    if (this.notesPending) {
+      this.notesTyped++;
+      this.notesPending = false;
+      this.save(cx);
+    }
     this.board = board;
     this.raw = null;
     this.lanes = emptyLanes();
@@ -272,6 +288,10 @@ export default class Kanban extends View {
   // Keys
 
   onKey(event, cx) {
+    if (this.view === "notes") {
+      if (event.key === "escape") { this.showBoard(cx); cx.stop_propagation(); }
+      return;
+    }
     if (this.editing) {
       if (event.key === "escape") { this.stopEdit(cx); cx.stop_propagation(); }
       return;
@@ -364,6 +384,7 @@ export default class Kanban extends View {
         cx.spawn(async (cx) => { await this.loadDetail(); cx.notify(); });
         return cx.notify();
       case "help": this.inspecting = "help"; return cx.notify();
+      case "notes": return this.showNotesPage(cx);
       case "close": return props()?.overlay && closeOverlay(props().overlay);
       default: {
         const column = action.match(/^column-(\d)$/);
@@ -732,6 +753,56 @@ export default class Kanban extends View {
     this.agentsBefore = now;
   }
 
+  // Notes: a free page per board, saved as you type.
+
+  showNotes(notes) {
+    this.notes = notes;
+    if (this.notesInput.value() !== notes) {
+      this.settingNotes = true;
+      this.notesInput.set_value(notes);
+      this.settingNotes = false;
+    }
+  }
+
+  showNotesPage(cx) {
+    this.view = "notes";
+    this.inspecting = null;
+    this.notesInput.focus();
+    cx.notify();
+  }
+
+  showBoard(cx) {
+    this.view = "board";
+    this.handle.focus();
+    cx.notify();
+  }
+
+  // Saves a moment after the last keystroke, so typing doesn't write the file on every key.
+  typeNotes(cx) {
+    if (this.settingNotes) return;
+    this.notes = this.notesInput.value();
+    this.notesPending = true;
+    const typed = ++this.notesTyped;
+    cx.timer.after(NOTES_SAVE_MS, (cx) => {
+      if (typed !== this.notesTyped) return;
+      this.notesPending = false;
+      this.save(cx);
+      cx.notify();
+    });
+  }
+
+  renderNotes(t) {
+    const font = settings().font_family;
+    return v_flex().flex_1().min_h(0).rounded(10).border_1().border_color(t.border).bg(t.background)
+      .child(h_flex().px(16).pt(12).pb(10).gap(8).items_center().border_b_1().border_color(t.border)
+        .child(div().size(8).rounded(4).bg(t.accent))
+        .child(div().flex_1().text_size(12.5).font_semibold().child(`${this.board} notes`))
+        .child(div().text_size(11).text_color(t.dim).child(this.notesPending ? "saving…" : `~/kanban/${this.board}.md`)))
+      .child(div().flex_1().min_h(0).p(16)
+        .child(Textarea.new(this.notesInput).size_full().text_size(13).text_color(t.foreground)
+          .when(Boolean(font), (el) => el.font_family(font))));
+  }
+
   // View
 
   render() {
@@ -743,7 +814,7 @@ export default class Kanban extends View {
       .size_full().px(18).pt(16).pb(12).gap(14).bg(t.canvas).text_color(t.foreground).text_size(13)
       .when(Boolean(font), (el) => el.font_family(font))
       .child(this.renderTop(t))
-      .child(this.inspecting ? this.renderInspector(t)
+      .child(this.view === "notes" ? this.renderNotes(t) : this.inspecting ? this.renderInspector(t)
         : h_flex().flex_1().min_h(0).gap(12).children(COLUMNS.map((name, c) => this.renderColumn(t, name, c))))
       .child(this.renderHint(t))
       // Measures the font's character width, which card wrapping is computed from.
@@ -792,6 +863,16 @@ export default class Kanban extends View {
       .child(h_flex().p(3).gap(2).items_center().rounded(8).border_1().border_color(t.border).bg(t.background)
         .children(this.boards.map(tab))
         .child(editingName ? div().w(160).child(this.renderInput(t, "new-board")) : add))
+      .child(h_flex().p(3).gap(2).items_center().rounded(8).border_1().border_color(t.border).bg(t.background)
+        .children([["board", "Board"], ["notes", "Notes"]].map(([view, label]) => {
+          const active = this.view === view;
+          return h_flex().id(`view-${view}`).h(26).px(10).gap(6).items_center().rounded(6).cursor_pointer()
+            .text_color(active ? t.foreground : t.muted).when(active, (el) => el.bg(t.raised))
+            .hover((st) => st.text_color(t.foreground))
+            .on_click((_e, cx) => (view === "notes" ? this.showNotesPage(cx) : this.showBoard(cx)))
+            .child(label)
+            .when(view === "notes" && Boolean(this.notes.trim()), (el) => el.child(div().size(5).rounded(3).bg(t.dim)));
+        })))
       .child(div().flex_1())
       .when(total > 0, (el) => el.child(h_flex().gap(10).items_center().text_size(11.5).text_color(t.dim)
         .child(`${shipped}/${total} shipped`)
@@ -931,6 +1012,7 @@ export default class Kanban extends View {
   // Keys as keycaps. Asks and the selected card's state come first, in words.
   renderHint(t) {
     const line = h_flex().h(22).gap(14).items_center().text_size(11.5).text_color(t.dim);
+    if (this.view === "notes") return line.child(this.keys(t, [["esc", "back to the board"]])).child("saved as you type");
     if (this.inspecting === "help") return line.child(this.keys(t, [["↑↓", "playbook"], ["esc", "back to the board"]]));
     if (this.inspecting) return line.child(this.keys(t, [["←→↑↓", "other cards"], ["esc", "back to the board"]]));
     if (this.confirmingDelete) {

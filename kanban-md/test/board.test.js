@@ -98,3 +98,15 @@ test("withoutLinks drops the links at the end; withLink adds one", () => {
   assert.equal(withLink("Pricing issue #3", "#9"), "Pricing issue #3 #9");
   assert.equal(withLink("Pricing #9", "#9"), "Pricing #9");
 });
+
+test("notes close the file, are kept as written, and never become cards", async () => {
+  const { notesOf } = await import("../mods/kanban-md/board.js");
+  const text = "# demo\n\n## Plan\n- A card\n\n## Notes\n\nWhy we split the API:\n\n## Decisions\n- not a card\n";
+  assert.deepEqual(parse(text), lanes([], ["A card"]));
+  assert.equal(notesOf(text), "Why we split the API:\n\n## Decisions\n- not a card");
+  assert.equal(notesOf("# demo\n\n## Plan\n- x\n"), "");
+  const written = serialize("demo", parse(text), notesOf(text));
+  assert.equal(notesOf(written), notesOf(text));
+  assert.deepEqual(parse(written), parse(text));
+  assert.doesNotMatch(serialize("demo", parse(text), "  \n"), /## Notes/);
+});
