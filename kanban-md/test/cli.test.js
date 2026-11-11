@@ -20,13 +20,20 @@ const board = (dir) => readFileSync(join(dir, "demo.md"), "utf8");
 
 test("kanban adds, moves, links and finishes cards in the board's format", () => {
   const dir = mkdtempSync(join(tmpdir(), "kanban-"));
-  assert.equal(kanban(dir, "add", "todo", "Pricing", "page").out, "added to todo: Pricing page");
+  assert.equal(kanban(dir, "add", "plan", "Pricing", "page").out, "added to plan: Pricing page");
   kanban(dir, "add", "ideas", "Dark mode");
-  assert.equal(kanban(dir, "move", "pricing", "wip").out, "moved to wip: Pricing page");
+  assert.equal(kanban(dir, "move", "pricing", "work").out, "moved to work: Pricing page");
   assert.equal(kanban(dir, "link", "Pricing page", "@feature/pricing").out, "linked: Pricing page @feature/pricing");
-  assert.equal(kanban(dir, "done", "2").out, "moved to done: Pricing page @feature/pricing");
-  assert.equal(board(dir), "# demo\n\n## Ideas\n- Dark mode\n\n## Todo\n\n## WIP\n\n## Test\n\n## Done\n- Pricing page @feature/pricing\n");
-  assert.match(kanban(dir, "show").out, /Done \(1\)\n {2}2\. Pricing page @feature\/pricing/);
+  assert.equal(kanban(dir, "ship", "2").out, "moved to ship: Pricing page @feature/pricing");
+  assert.equal(board(dir), "# demo\n\n## Ideas\n- Dark mode\n\n## Plan\n\n## Work\n\n## Review\n\n## Ship\n- Pricing page @feature/pricing\n");
+  assert.match(kanban(dir, "show").out, /Ship \(1\)\n {2}2\. Pricing page @feature\/pricing/);
+});
+
+test("kanban still takes the old column names", () => {
+  const dir = mkdtempSync(join(tmpdir(), "kanban-"));
+  assert.equal(kanban(dir, "add", "todo", "Pricing").out, "added to plan: Pricing");
+  assert.equal(kanban(dir, "move", "1", "test").out, "moved to review: Pricing");
+  assert.equal(kanban(dir, "done", "1").out, "moved to ship: Pricing");
 });
 
 test("kanban refuses what it can't do clearly", () => {

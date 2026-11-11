@@ -14,13 +14,13 @@ test("prStatus reads state, checks and review from gh", () => {
   assert.equal(prStatus({ state: "CLOSED", statusCheckRollup: [] }).checks, null);
 });
 
-test("columnFor moves merged cards to done and open ones to test", () => {
+test("columnFor ships merged cards and moves open ones to review", () => {
   const open = { state: "open" };
   assert.equal(columnFor({ state: "merged" }, 2), 4);
   assert.equal(columnFor({ state: "merged" }, 4), null);
   assert.equal(columnFor(open, 1), 3);
   assert.equal(columnFor(open, 3), null);
-  assert.equal(columnFor(open, 4), null); // done by hand stays done
+  assert.equal(columnFor(open, 4), null); // shipped by hand stays shipped
   assert.equal(columnFor({ state: "draft" }, 2), null);
   assert.equal(columnFor({ state: "closed" }, 2), null);
 });

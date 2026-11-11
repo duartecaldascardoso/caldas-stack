@@ -455,7 +455,7 @@ export default class Kanban extends View {
   // GitHub: what each number on the board is, cards that follow it, and opening pull requests.
 
   // Asks gh about every number on the open board: a pull request, else an issue. Then moves the
-  // cards that should follow: merged or completed to done, an open pull request to test.
+  // cards that should follow: merged or completed to ship, an open pull request to review.
   async syncStatuses(cx) {
     const repo = await this.findRepo(this.board);
     if (!repo) return;
@@ -478,7 +478,7 @@ export default class Kanban extends View {
   followStatuses(cx) {
     const moves = [];
     const lanes = this.lanes.map((lane) => [...lane]);
-    const columns = { test: COLUMNS.indexOf("Test"), done: COLUMNS.indexOf("Done") };
+    const columns = { review: COLUMNS.indexOf("Review"), ship: COLUMNS.indexOf("Ship") };
     this.lanes.forEach((lane, col) => lane.forEach((card) => {
       const links = this.linksOf(card);
       const ref = links?.pr ?? links?.issue;
@@ -540,7 +540,7 @@ export default class Kanban extends View {
   // Working on cards: start an agent on a card, and follow the agents working on them.
 
   // s: a worktree on a branch named after the card, a space there with an agent that gets the
-  // card (and its issue) as its task, the card linked to the branch and moved to wip. Asks first.
+  // card (and its issue) as its task, the card linked to the branch and moved to work. Asks first.
   // Claude Code with pstack gets the card through poteto-mode, with the card's playbook.
   askStartWork(cx) {
     const { col } = this;
@@ -602,14 +602,14 @@ export default class Kanban extends View {
       run("space.new", { name: playbookOf(title).title.slice(0, 40), folder, argv: agent.run, task: taskFor(title, issue, pstack) });
       const { playbook } = playbookOf(title);
       if (playbook) await this.recordRun(branch, playbook);
-      const wip = COLUMNS.indexOf("WIP");
+      const work = COLUMNS.indexOf("Work");
       const linked = cardLinks(card)?.branch ? card : withLink(card, `@${branch}`);
       const lanes = this.lanes.map((lane) => [...lane]);
       const at = lanes[col].indexOf(card);
       if (at < 0) return; // the board moved on; the work started anyway
       lanes[col].splice(at, 1);
-      lanes[wip].push(linked);
-      this.apply({ lanes, col: wip, row: lanes[wip].length - 1 }, cx);
+      lanes[work].push(linked);
+      this.apply({ lanes, col: work, row: lanes[work].length - 1 }, cx);
       notify({ title: `Started ${title}`, body: `${agent.name ?? "Agent"} on ${branch}`, level: "success", timeout: 3000 });
     });
   }
@@ -784,16 +784,16 @@ export default class Kanban extends View {
       .on_click((_e, cx) => this.startEdit({ kind: "board" }, "", cx))
       .child("+");
     const total = this.lanes.reduce((n, lane) => n + lane.length, 0);
-    const done = this.lanes[COLUMNS.length - 1].length;
+    const shipped = this.lanes[COLUMNS.length - 1].length;
     return h_flex().items_center().gap(12)
       .child(h_flex().p(3).gap(2).items_center().rounded(8).border_1().border_color(t.border).bg(t.background)
         .children(this.boards.map(tab))
         .child(editingName ? div().w(160).child(this.renderInput(t, "new-board")) : add))
       .child(div().flex_1())
       .when(total > 0, (el) => el.child(h_flex().gap(10).items_center().text_size(11.5).text_color(t.dim)
-        .child(`${done}/${total} done`)
+        .child(`${shipped}/${total} shipped`)
         .child(div().w(96).h(4).rounded(2).bg(t.border)
-          .child(div().h_full().rounded(2).bg(t.ansi2).w(Math.round((96 * done) / total))))));
+          .child(div().h_full().rounded(2).bg(t.ansi2).w(Math.round((96 * shipped) / total))))));
   }
 
   renderColumn(t, name, c) {

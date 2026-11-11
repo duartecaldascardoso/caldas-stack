@@ -25,13 +25,13 @@ export function issueStatus(issue) {
   return { kind: "issue", state: closed ? "closed" : "open", completed: closed && issue.stateReason !== "NOT_PLANNED", url: issue.url ?? null };
 }
 
-// The column a card belongs in now, or null to leave it: a merged pull request is done, and an
-// open one is in test once it has left ideas, todo and wip; a completed issue is done. Column
+// The column a card belongs in now, or null to leave it: a merged pull request ships, and an
+// open one is in review once it has left ideas, plan and work; a completed issue ships. Column
 // indexes follow COLUMNS.
-export function columnFor(status, col, { test = 3, done = 4 } = {}) {
-  if (status.kind === "issue") return status.completed && col !== done ? done : null;
-  if (status.state === "merged") return col === done ? null : done;
-  if (status.state === "open" && col < test) return test;
+export function columnFor(status, col, { review = 3, ship = 4 } = {}) {
+  if (status.kind === "issue") return status.completed && col !== ship ? ship : null;
+  if (status.state === "merged") return col === ship ? null : ship;
+  if (status.state === "open" && col < review) return review;
   return null;
 }
 

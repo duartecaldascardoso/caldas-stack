@@ -48,9 +48,9 @@ export const LOOP = [
   { name: "Plan", you: "Write a card, with a prefix like bug:", board: "Saves it in ~/kanban", agent: null },
   { name: "Start", you: "s on the card, then y", board: "A worktree, a branch, and a space with the agent", agent: "Gets the card as its first message" },
   { name: "Work", you: null, board: "Shows the agent working, blocked or ready", agent: "Works the playbook, reports each step, gathers proof" },
-  { name: "Review", you: "g for the diff, comments, Send to agent", board: "Moves the card to test when the PR opens", agent: "Opens the PR, answers your comments" },
+  { name: "Review", you: "g for the diff, comments, Send to agent", board: "Moves the card to Review when the PR opens", agent: "Opens the PR, answers your comments" },
   { name: "Babysit", you: "⇧B when checks fail or changes are asked", board: "Shows checks, review and conflicts", agent: "Conflicts, threads, then CI. Never merges." },
-  { name: "Ship", you: "Approve and merge. Only you land it.", board: "Moves the card to done", agent: null },
+  { name: "Ship", you: "Approve and merge. Only you land it.", board: "Moves the card to Ship", agent: null },
 ];
 
 // The station a card is at, from its column (as COLUMNS orders them), whether an agent or a run
