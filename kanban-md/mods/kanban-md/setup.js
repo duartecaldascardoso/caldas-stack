@@ -91,8 +91,9 @@ export function settingsOf(text, path) {
   return { name: path.split("/").at(-1), description: Object.keys(settings).join(", ") || "empty", path };
 }
 
-// A settings file's hooks: [{ name, description, path }], one per command, named by event and
-// matcher ("PreToolUse Bash") and described by its command.
+// A settings file's hooks: [{ name, description, detail, path }], one per command, named by
+// event and matcher ("PreToolUse Bash"), described by its command, and with `detail`, what the
+// reader shows: the whole hook as markdown.
 export function hooksOf(settingsText, path) {
   const hooks = json(settingsText)?.hooks;
   if (!hooks || typeof hooks !== "object") return [];
@@ -100,18 +101,27 @@ export function hooksOf(settingsText, path) {
     (group.hooks ?? []).map((hook) => ({
       name: [event, group.matcher].filter(Boolean).join(" "),
       description: hook.command ?? hook.prompt ?? hook.type ?? "",
+      detail: [
+        `When: ${event}${group.matcher ? `, matching \`${group.matcher}\`` : ""}`,
+        `Runs: a ${hook.type ?? "command"}${hook.timeout ? `, for up to ${hook.timeout}s` : ""}`,
+        "", "```", hook.command ?? hook.prompt ?? "", "```",
+      ].join("\n"),
       path,
     }))));
 }
 
-// MCP servers in a { mcpServers } object: [{ name, description, path }], described by how they
-// run (the command and its arguments, or the URL).
+// MCP servers in a { mcpServers } object: [{ name, description, detail, path }], described by
+// how they run (the command and its arguments, or the URL). `detail` names their environment and
+// headers without their values, which are often tokens.
 export function serversOf(config, path) {
   const servers = config?.mcpServers;
   if (!servers || typeof servers !== "object") return [];
-  return Object.entries(servers).map(([name, s]) => ({
-    name, description: s.url ?? [s.command, ...(s.args ?? [])].filter(Boolean).join(" "), path,
-  }));
+  return Object.entries(servers).map(([name, s]) => {
+    const runs = s.url ?? [s.command, ...(s.args ?? [])].filter(Boolean).join(" ");
+    const keys = (label, object) => (object && Object.keys(object).length ? [`${label}: ${Object.keys(object).join(", ")} (values hidden)`] : []);
+    const detail = [`${s.url ? "URL" : "Runs"}${s.type ? ` (${s.type})` : ""}:`, "", "```", runs, "```", "", ...keys("Environment", s.env), ...keys("Headers", s.headers)].join("\n").trim();
+    return { name, description: runs, detail, path };
+  });
 }
 
 // Installed plugins (installed_plugins.json, either version) and whether settings enable them:

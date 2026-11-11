@@ -90,3 +90,11 @@ test("overlaps finds names defined for the project and everywhere", () => {
   assert.deepEqual([...found.skills], ["deploy"]);
   assert.deepEqual([...found.commands], []);
 });
+
+test("hooks and servers carry what the reader shows, without secrets", () => {
+  const [hook] = hooksOf(JSON.stringify({ hooks: { PreToolUse: [{ matcher: "Bash", hooks: [{ type: "command", command: "guard.sh", timeout: 10 }] }] } }), "s.json");
+  assert.equal(hook.detail, "When: PreToolUse, matching `Bash`\nRuns: a command, for up to 10s\n\n```\nguard.sh\n```");
+  const [server] = serversOf({ mcpServers: { linear: { type: "http", url: "https://mcp.linear.app", headers: { Authorization: "Bearer secret" }, env: { TOKEN: "abc" } } } }, "m.json");
+  assert.equal(server.detail, "URL (http):\n\n```\nhttps://mcp.linear.app\n```\n\nEnvironment: TOKEN (values hidden)\nHeaders: Authorization (values hidden)");
+  assert.ok(!server.detail.includes("secret") && !server.detail.includes("abc"));
+});

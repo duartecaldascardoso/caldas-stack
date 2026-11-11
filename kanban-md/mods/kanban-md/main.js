@@ -16,7 +16,7 @@ import { pickAgent, lastAgentMessage } from "./agents.js";
 import { alpha, unzoom, keycaps, sectionLabel, agentMark, chipRowsView } from "./ui.js";
 import { helpView, cardRunView } from "./inspector.js";
 import { projectSetup, everywhereSetup } from "./claude.js";
-import { setupPage, setupItems, columnRows } from "./setup-page.js";
+import { setupPage, setupItems, columnRows, readerView } from "./setup-page.js";
 import { setupSummary } from "./setup.js";
 
 const TEXT_SIZE = 13;
@@ -131,6 +131,7 @@ export default class Kanban extends View {
     // What agents work with here and everywhere: { root, project, everywhere }, read when shown.
     this.setup = null;
     this.setupIndex = 0;
+    this.reading = null; // a row read in place of the list: { index, text } (text null while read)
     this.setupScrolls = [VirtualListScrollHandle.new(), VirtualListScrollHandle.new()];
     this.archived = []; // the board's archive, [{ day, cards }], read when it's shown
     // Go to (⌘K): cards on every board, boards and actions, filtered as you type.
@@ -251,6 +252,7 @@ export default class Kanban extends View {
     this.ask = null;
     this.archived = [];
     if (this.view === "archive") cx.spawn((cx) => this.loadArchive(cx));
+    this.reading = null;
     if (this.view === "setup") cx.spawn((cx) => this.loadSetup(cx));
     storeBoard(board);
     cx.spawn(async (cx) => { await this.refresh(cx); await this.syncStatuses(cx); });
@@ -930,6 +932,7 @@ export default class Kanban extends View {
 
   showSetupPage(cx) {
     this.view = "setup";
+    this.reading = null;
     this.inspecting = null;
     this.handle.focus();
     cx.spawn((cx) => this.loadSetup(cx));
@@ -957,12 +960,24 @@ export default class Kanban extends View {
     ]);
   }
 
-  // ↑↓ move through the rows, ←→ between the columns, enter or o opens the row's file.
+  // ↑↓ move through the rows, ←→ between the columns, enter reads the row, o opens its file in
+  // the editor. While reading, ↑↓ read the previous and next rows and esc goes back to the list.
   setupKey(key, cx) {
     const items = setupItems(this.setup);
     const action = KEYS[key];
-    if (key === "enter" || key === "o") {
-      this.openSetupItem(this.setupIndex, cx);
+    if (key === "o") {
+      this.openInEditor(items[this.setupIndex]?.item, cx);
+      return true;
+    }
+    if (this.reading) {
+      if (key === "escape") this.reading = null;
+      else if (action === "up" || action === "down") this.read(Math.max(0, Math.min(items.length - 1, this.setupIndex + (action === "up" ? -1 : 1))), cx);
+      else return false;
+      cx.notify();
+      return true;
+    }
+    if (key === "enter") {
+      this.read(this.setupIndex, cx);
       return true;
     }
     if (!items.length || !["up", "down", "left", "right"].includes(action)) return false;
@@ -980,12 +995,30 @@ export default class Kanban extends View {
     return true;
   }
 
-  // Opens the row's file in the editor picked in snappy-diff's settings, as snappy-diff does.
-  openSetupItem(index, cx) {
-    const path = setupItems(this.setup)[index]?.item.path;
+  // Shows a row's content in place of the list: what setup.js wrote about it (a hook, an MCP
+  // server), else its file. A plugin shows its README, else its manifest; JSON shows as code.
+  read(index, cx) {
+    const item = setupItems(this.setup)[index]?.item;
+    if (!item) return;
     this.setupIndex = index;
-    if (path) cx.open_url(`${this.editor ?? "zed"}://file${encodeURI(path)}`);
+    this.reading = { index, text: item.detail ?? null };
     cx.notify();
+    if (item.detail !== undefined) return;
+    cx.spawn(async (cx) => {
+      const isPlugin = setupItems(this.setup)[index]?.kind === "plugins";
+      const paths = isPlugin ? [`${item.path}/README.md`, `${item.path}/.claude-plugin/plugin.json`, `${item.path}/plugin.json`] : [item.path];
+      let text = null;
+      let path = null;
+      for (path of paths) if ((text = await readTextFile(path).catch(() => null)) !== null) break;
+      if (this.reading?.index !== index) return;
+      this.reading = { index, text: text === null ? "Nothing to read here." : path.endsWith(".json") ? `\`\`\`\n${text}\n\`\`\`` : text };
+      cx.notify();
+    });
+  }
+
+  // Opens a row's file in the editor picked in snappy-diff's settings, as snappy-diff does.
+  openInEditor(item, cx) {
+    if (item?.path) cx.open_url(`${this.editor ?? "zed"}://file${encodeURI(item.path)}`);
   }
 
   // The editor picked in snappy-diff's settings: "zed" (its default), "vscode" or "cursor".
@@ -1145,7 +1178,9 @@ export default class Kanban extends View {
       .when(Boolean(font), (el) => el.font_family(font))
       .child(this.renderTop(t))
       .child(this.view === "notes" ? this.renderNotes(t) : this.view === "archive" ? this.renderArchive(t)
-        : this.view === "setup" ? setupPage(t, { setup: this.setup, selected: this.setupIndex, scrolls: this.setupScrolls, pick: (i, cx) => this.openSetupItem(i, cx) })
+        : this.view === "setup" ? (this.reading
+          ? readerView(t, { entry: setupItems(this.setup)[this.reading.index], index: this.reading.index, text: this.reading.text })
+          : setupPage(t, { setup: this.setup, selected: this.setupIndex, scrolls: this.setupScrolls, pick: (i, cx) => this.read(i, cx) }))
         : this.inspecting ? this.renderInspector(t)
         : h_flex().flex_1().min_h(0).gap(12).children(COLUMNS.map((name, c) => this.renderColumn(t, name, c))))
       .child(this.renderHint(t))
@@ -1350,7 +1385,8 @@ export default class Kanban extends View {
     if (this.palette) return line.child(keycaps(t, [["↑↓", "pick"], ["↵", "go"], ["esc", "close"]]));
     if (this.view === "notes") return line.child(keycaps(t, [["esc", "back to the board"]])).child("saved as you type");
     if (this.view === "archive") return line.child(keycaps(t, [["esc", "back to the board"]]));
-    if (this.view === "setup") return line.child(keycaps(t, [["↑↓", "pick"], ["←→", "project or everywhere"], ["↵", "open in your editor"], ["esc", "back to the board"]]));
+    if (this.view === "setup" && this.reading) return line.child(keycaps(t, [["↑↓", "previous, next"], ["o", "open in your editor"], ["esc", "back to the list"]]));
+    if (this.view === "setup") return line.child(keycaps(t, [["↑↓", "pick"], ["←→", "project or everywhere"], ["↵", "read"], ["o", "open in your editor"], ["esc", "back to the board"]]));
     if (this.inspecting === "help") return line.child(keycaps(t, [["↑↓", "playbook"], ["esc", "back to the board"]]));
     if (this.inspecting) return line.child(keycaps(t, [["←→↑↓", "other cards"], ["esc", "back to the board"]]));
     if (this.ask) {

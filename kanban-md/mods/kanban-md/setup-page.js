@@ -4,8 +4,12 @@
 // row can be scrolled into view.
 import { div } from "gpui-kit";
 import { v_flex, h_flex, v_virtual_list, Scrollbar } from "gpui-base";
+import { settings } from "herdr";
 import { alpha, sectionLabel } from "./ui.js";
 import { overlaps } from "./setup.js";
+import { markdownBlocks } from "./markdown.js";
+
+const MAX_BLOCKS = 1500; // the reader stops there; the editor has the rest
 
 export const SECTIONS = [
   ["instructions", "Instructions"], ["settings", "Settings"], ["skills", "Skills"], ["commands", "Commands"],
@@ -87,4 +91,55 @@ function itemRow(t, { item }, selected, alsoEverywhere) {
       .when(Boolean(alsoEverywhere), (el) => el.child(tag("also everywhere", t.ansi4)))
       .when(Boolean(item.local), (el) => el.child(tag(item.local, t.ansi3))))
     .child(div().min_w(0).truncate().text_size(11.5).text_color(t.muted).child(item.description || " ")));
+}
+
+// One row read in place of the columns: `entry` from setupItems, `text` its markdown (null while
+// it's read). The text is drawn as markdown: frontmatter in a box, headings, list items, code.
+export function readerView(t, { entry, index, text }) {
+  const { item, kind, side } = entry;
+  const section = SECTIONS.find(([k]) => k === kind)[1];
+  const blocks = text == null ? [] : markdownBlocks(text);
+  const tag = (label, color) => div().flex_none().px(6).h(18).flex().items_center().rounded(5).text_size(10.5)
+    .bg(alpha(color, "22")).text_color(color).child(label);
+  return v_flex().flex_1().min_h(0).rounded(10).border_1().border_color(t.border).bg(t.background)
+    .child(v_flex().px(20).pt(14).pb(12).gap(6).border_b_1().border_color(t.border)
+      .child(h_flex().gap(10).items_center()
+        .child(div().size(8).rounded(4).flex_none().bg(side === "project" ? t.accent : t.ansi5))
+        .child(div().min_w(0).truncate().text_size(16).font_semibold().child(item.name))
+        .when(Boolean(item.local), (el) => el.child(tag(item.local, t.ansi3))))
+      .child(h_flex().gap(8).items_center().text_size(11.5).text_color(t.dim)
+        .child(div().flex_none().child(`${side === "project" ? "This project" : "Everywhere"} · ${section}${item.from ? ` · ${item.from}` : ""}`))
+        .child(div().min_w(0).truncate().child(item.path ?? ""))))
+    .child(v_flex().id(`reader-${index}`).flex_1().min_h(0).overflow_y_scroll().px(24).py(18).gap(2)
+      .when(text == null, (el) => el.child(div().text_size(12).text_color(t.dim).child("Reading…")))
+      .when(text != null && !blocks.length, (el) => el.child(div().text_size(12).text_color(t.dim).child("Empty.")))
+      .children(blocks.slice(0, MAX_BLOCKS).map((block) => blockView(t, block)))
+      .when(blocks.length > MAX_BLOCKS, (el) => el.child(div().pt(12).text_size(12).text_color(t.dim).child("The rest is in the file: o opens it."))));
+}
+
+const plain = (text) => text.replace(/\*\*(.+?)\*\*/g, "$1").replace(/__(.+?)__/g, "$1");
+
+function blockView(t, block) {
+  const font = settings().font_family;
+  const mono = (el) => (font ? el.font_family(font) : el);
+  switch (block.type) {
+    case "frontmatter":
+    case "code":
+      return mono(v_flex().my(4).px(12).py(10).rounded(7).border_1().border_color(t.border).bg(t.canvas)
+        .text_size(11.5).text_color(block.type === "frontmatter" ? t.dim : t.foreground)
+        .children(block.lines.map((line) => div().min_h(17).whitespace_normal().child(line || " "))));
+    case "heading":
+      return div().pt(block.level <= 2 ? 10 : 6).pb(2).font_semibold().text_color(t.foreground)
+        .text_size(block.level === 1 ? 17 : block.level === 2 ? 15 : 13.5).whitespace_normal().child(plain(block.text));
+    case "item":
+      return h_flex().items_start().gap(8).pl(block.depth * 16).text_size(12.5)
+        .child(div().flex_none().text_color(t.dim).child("•"))
+        .child(div().flex_1().min_w(0).text_color(t.muted).whitespace_normal().child(plain(block.text)));
+    case "quote":
+      return div().pl(10).border_l(2).border_color(t.border).text_size(12.5).text_color(t.dim).whitespace_normal().child(plain(block.text));
+    case "gap":
+      return div().h(8);
+    default:
+      return div().text_size(12.5).text_color(t.muted).whitespace_normal().child(plain(block.text));
+  }
 }
