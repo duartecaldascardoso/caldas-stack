@@ -50,6 +50,8 @@ The board lives in its own tab, so it keeps following your agents and GitHub whi
 - **Agents, from the board:** `t` takes you to a card's agent, and the Board tab reads `Board · 1 needs you` while one is blocked.
 - **Follows your theme**, with a progress bar per board.
 
+The bottom line stays short: the selected card's state and its next two or three steps, with `⌘K` for every action (each showing its key) and `?` for every key. The full set:
+
 | Key | Action |
 | --- | --- |
 | `← → ↑ ↓` or `h l k j` | Move between cards and columns |

@@ -11,12 +11,14 @@ export const alpha = (color, hex) => (/^#[0-9a-f]{6}$/i.test(color) ? color + he
 // while the lengths a mod sets are scaled. Measurements come back through this.
 export const unzoom = (px) => px / (settings().zoom || 1);
 
+// A key as a keycap.
+export const keycap = (t, key) => div().h(18).min_w(18).px(5).flex().flex_none().items_center().justify_center().rounded(4)
+  .border_1().border_color(t.border).bg(t.background).text_size(10.5).text_color(t.muted).child(key);
+
 // Keys as keycaps, each with what it does: [[key, label]].
 export function keycaps(t, pairs) {
-  const cap = (key) => div().h(18).min_w(18).px(5).flex().items_center().justify_center().rounded(4)
-    .border_1().border_color(t.border).bg(t.background).text_size(10.5).text_color(t.muted).child(key);
   return h_flex().gap(14).items_center().children(pairs.map(([key, label]) =>
-    h_flex().gap(5).items_center().child(cap(key)).child(label)));
+    h_flex().gap(5).items_center().child(keycap(t, key)).child(label)));
 }
 
 // A small uppercase heading over a section.

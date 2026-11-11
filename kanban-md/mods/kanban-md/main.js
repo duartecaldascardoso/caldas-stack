@@ -49,7 +49,16 @@ const KEYS = {
   "1": "column-1", "2": "column-2", "3": "column-3", "4": "column-4", "5": "column-5",
 };
 
-const HINTS = [["⌘K", "go to"], ["?", "how it works"], ["⇧N", "notes"], ["⇧I", "import issues"], ["←→↑↓", "move"], ["⇧", "move card"], ["n", "new"], ["e", "edit"], ["d", "delete"], ["⌘Z", "undo"], ["[ ]", "board"], ["b", "new board"], ["⇧D", "delete board"]];
+// Every key, grouped, for How it works. The hint line only offers the selected card's next
+// steps; ⌘K lists every action with its key.
+const KEY_GUIDE = [
+  ["Move", [["←→↑↓", "between cards"], ["hjkl", "the same"], ["1–5", "to a column"], ["⇧ + move", "the card"], ["[ ]", "other boards"]]],
+  ["Cards", [["n", "new card"], ["e ↵", "edit"], ["d", "delete"], ["⌘Z", "undo"], ["⌘⇧Z", "redo"], ["⇧A", "archive shipped"]]],
+  ["Work", [["s", "start work"], ["t", "go to agent"], ["i", "inspect"], ["g", "open diff or issue"], ["@", "link branch"], ["o", "open pull request"], ["⇧B", "babysit"], ["f", "fix CI"]]],
+  ["Board", [["⌘K /", "go to, all actions"], ["⇧N", "notes"], ["⇧I", "import issues"], ["b", "new board"], ["p", "project board"], ["⇧D", "delete board"], ["?", "this page"]]],
+];
+// Card actions the hint line leaves to ⌘K: they apply to every card.
+const EVERY_CARD = new Set(["edit", "delete"]);
 // Each column's dot, from the theme's palette.
 const COLUMN_TINTS = ["ansi5", "ansi4", "ansi3", "ansi6", "ansi2"];
 const NO_REPO = { title: "No repository for this board", body: "Open the board from a terminal inside the project once.", level: "warning" };
@@ -121,7 +130,7 @@ export default class Kanban extends View {
     this.palette = false;
     this.paletteIndex = 0;
     this.everything = []; // every board's cards, [{ board, lanes }], read when go-to opens
-    this.paletteInput = InputState.new({ placeholder: "Go to a card, board or action" });
+    this.paletteInput = InputState.new({ placeholder: "Cards, boards and actions" });
     this.paletteInput.on("change", (_e, cx) => { this.paletteIndex = 0; cx.notify(); });
     this.notes = "";
     this.notesPending = false; // typed but not saved yet: a refresh mustn't overwrite it
@@ -943,21 +952,51 @@ export default class Kanban extends View {
       label: withoutLinks(card), hint: board === this.board ? COLUMNS[col] : `${board} · ${COLUMNS[col]}`,
       run: (cx) => this.goToCard(board, { col, row }, cx),
     });
+    const card = this.selected();
+    const forCard = this.cardActions(card).map(({ key, label, action }) => ({ label: `${label}: ${withoutLinks(card)}`, hint: key, run: (cx) => this.perform(action, cx) }))
+      .filter((r) => hit(r.label));
     const here = cardsOf(this.board, this.lanes).map(toCard);
     const elsewhere = !query ? [] : this.everything.filter((b) => b.board !== this.board).flatMap((b) => cardsOf(b.board, b.lanes)).slice(0, 40).map(toCard);
     const boards = this.boards.filter((b) => b !== this.board && hit(b))
       .map((b) => ({ label: b, hint: "board", run: (cx) => this.goToCard(b, null, cx) }));
+    const offer = this.project && !this.boards.includes(this.project.name);
     const actions = [
-      ["New card", "n", (cx) => this.perform("new", cx)],
-      ["Notes", "⇧N", (cx) => this.showNotesPage(cx)],
+      ["New card", "n", "new"],
+      ["Notes", "⇧N", "notes"],
       ["Archive", "", (cx) => this.showArchivePage(cx)],
-      ["Archive shipped cards", "⇧A", (cx) => this.askArchive(cx)],
-      ["Import open issues", "⇧I", (cx) => this.askImport(cx)],
-      ["How it works", "?", (cx) => { this.inspecting = "help"; cx.notify(); }],
-      ["New board", "b", (cx) => this.perform("new-board", cx)],
-      ["Delete board", "⇧D", (cx) => this.perform("delete-board", cx)],
-    ].filter(([label]) => hit(label)).map(([label, hint, run]) => ({ label, hint: hint || "action", run }));
-    return [...here, ...elsewhere, ...boards, ...actions];
+      ["Archive shipped cards", "⇧A", "archive"],
+      ["Import open issues", "⇧I", "import-issues"],
+      ["Undo", "⌘Z", "undo"],
+      ["Redo", "⌘⇧Z", "redo"],
+      ["How it works, and every key", "?", "help"],
+      ["New board", "b", "new-board"],
+      ...(offer ? [[`Board for ${this.project.name}`, "p", "project-board"]] : []),
+      ["Delete board", "⇧D", "delete-board"],
+    ].filter(([label]) => hit(label))
+      .map(([label, hint, action]) => ({ label, hint: hint || "action", run: typeof action === "function" ? action : (cx) => this.perform(action, cx) }));
+    return [...forCard, ...here, ...elsewhere, ...boards, ...actions];
+  }
+
+  // What can be done with a card, the likeliest next step first: [{ key, label, action }].
+  cardActions(card) {
+    if (card == null) return [];
+    const links = this.linksOf(card);
+    const pr = links?.pr;
+    const branch = this.branchOf(card);
+    const agent = this.agentOf(card);
+    const repo = this.repoFor(this.board);
+    const actions = [
+      ...(pr?.status?.checks === "failing" && agent ? [["f", "Fix CI", "fix-ci"]] : []),
+      ...(agent ? [["t", "Go to agent", "go-to-agent"]] : repo ? [["s", "Start work", "start-work"]] : []),
+      ...(repo && (pr || branch) ? [["g", "Open diff", "open-diff"]] : repo && links?.issue ? [["g", "Open issue", "open-diff"]] : []),
+      ["i", "Inspect", "inspect"],
+      ...(pr && babysitFor(pr.n, pr.status) && !agent ? [["⇧B", "Babysit", "babysit"]] : []),
+      ...(repo && !pr ? [["o", "Open pull request", "open-pr"]] : []),
+      ...(repo && !branch ? [["@", "Link branch", "link"]] : []),
+      ["e", "Edit", "edit"],
+      ["d", "Delete", "delete"],
+    ];
+    return actions.map(([key, label, action]) => ({ key, label, action }));
   }
 
   paletteKey(key, cx) {
@@ -1214,7 +1253,7 @@ export default class Kanban extends View {
 
   // In place of the columns: the selected card's run (i), or the loop and every playbook (?).
   renderInspector(t) {
-    if (this.inspecting === "help") return helpView(t, this.helpIndex);
+    if (this.inspecting === "help") return helpView(t, this.helpIndex, KEY_GUIDE);
     const card = this.selected();
     if (card == null) return div().flex_1().text_color(t.muted).child("No card selected.");
     const branch = this.branchOf(card);
@@ -1237,29 +1276,22 @@ export default class Kanban extends View {
         .child(keycaps(t, [["y", this.ask.yes], ["any key", "cancel"]]));
     }
     if (this.editing) return line.child(keycaps(t, [["↵", "save"], ["esc", "cancel"]]));
+    // The selected card's state and its next steps on the left; the way to everything else on
+    // the right.
     const card = this.selected();
     const links = card != null ? this.linksOf(card) : null;
     const ref = links?.pr ?? links?.issue;
-    const status = ref?.status;
-    const branch = card != null ? this.branchOf(card) : null;
     const agent = card != null ? this.agentOf(card) : null;
-    const linked = card == null || !this.repoFor(this.board) ? []
-      : [
-        ...(links?.pr || branch ? [["g", "open diff"]] : links?.issue ? [["g", "open issue"]] : []),
-        ...(links?.pr?.status?.checks === "failing" && agent ? [["f", "fix CI"]] : []),
-        ["i", "inspect"],
-        ...(agent ? [["t", "go to agent"]] : [["s", "start work"]]),
-        ...(!branch ? [["@", "link branch"]] : []),
-        ...(!links?.pr ? [["o", "open pull request"]] : []),
-        ...(links?.pr && babysitFor(links.pr.n, status) && !agent ? [["⇧B", "babysit"]] : []),
-      ];
+    const next = card == null ? [["n", "new card"]]
+      : this.cardActions(card).filter((a) => !EVERY_CARD.has(a.action)).slice(0, 3).map((a) => [a.key, a.label.toLowerCase()]);
     const offer = this.project && !this.boards.includes(this.project.name) ? [["p", `board for ${this.project.name}`]] : [];
-    const shipped = this.lanes[COLUMNS.length - 1].length ? [["⇧A", "archive shipped"]] : [];
     const doing = { working: "is working", blocked: "needs you", done: "is ready for review", idle: "is idle" };
     return line
       .when(Boolean(agent), (el) => el.child(h_flex().gap(6).items_center().text_color(t.muted)
         .child(agentMark(t, agent)).child(`${agent.name ?? "Agent"} ${doing[agent.status] ?? agent.status}`)))
-      .when(Boolean(status), (el) => el.child(div().text_color(t.muted).child(describe(ref.n, status))))
-      .child(keycaps(t, [...offer, ...linked, ...shipped, ...HINTS]));
+      .when(Boolean(ref?.status), (el) => el.child(div().text_color(t.muted).child(describe(ref.n, ref.status))))
+      .child(keycaps(t, [...offer, ...next]))
+      .child(div().flex_1())
+      .child(keycaps(t, [["⌘K", "all actions"], ["?", "help"]]));
   }
 }

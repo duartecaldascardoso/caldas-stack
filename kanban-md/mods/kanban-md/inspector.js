@@ -5,15 +5,16 @@ import { v_flex, h_flex } from "gpui-base";
 import { describe } from "./links.js";
 import { PLAYBOOK_LIST } from "./work.js";
 import { progress, LOOP, stationOf, ago, summarize } from "./runs.js";
-import { alpha, sectionLabel, agentMark } from "./ui.js";
+import { alpha, keycap, sectionLabel, agentMark } from "./ui.js";
 
 const TRACK_LABEL = 84; // the you / board / agent labels in How it works
 
 const panel = (t) => v_flex().id("inspector").flex_1().min_h(0).overflow_y_scroll().gap(22).px(28).py(24)
   .rounded(10).border_1().border_color(t.border).bg(t.raised);
 
-// How it works: the loop, who does what at each station, and the playbook at `index`.
-export function helpView(t, index) {
+// How it works: the loop, who does what at each station, the playbook at `index`, and every key
+// (`keyGuide`: [group, [[key, what it does]]]).
+export function helpView(t, index, keyGuide) {
   const book = PLAYBOOK_LIST[index];
   const who = [["You", t.ansi3, "you"], ["Board", t.ansi6, "board"], ["Agent", t.ansi5, "agent"]];
   return panel(t)
@@ -41,7 +42,14 @@ export function helpView(t, index) {
             .child(h_flex().gap(10).items_center().child(div().text_size(16).font_semibold().child(book.playbook))
               .child(div().text_size(11.5).text_color(t.dim).child(`${book.steps.length} steps`)))
             .child(ends(t, book)))
-          .child(steps(t, book, null)))));
+          .child(steps(t, book, null)))))
+    .child(v_flex().gap(10)
+      .child(sectionLabel(t, "Keys"))
+      .child(h_flex().items_start().gap(28).children(keyGuide.map(([group, keys]) => v_flex().flex_1().min_w(0).gap(8)
+        .child(div().text_size(12).font_medium().text_color(t.foreground).child(group))
+        .children(keys.map(([key, does]) => h_flex().gap(10).items_center().text_size(12)
+          .child(div().w(64).flex_none().child(keycap(t, key)))
+          .child(div().min_w(0).truncate().text_color(t.muted).child(does))))))));
 }
 
 // A card's run. `card`: { title, col, run, book, planned, agent, branch, pr, detail }, the
