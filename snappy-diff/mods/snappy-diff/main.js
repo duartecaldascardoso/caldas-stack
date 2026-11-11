@@ -1,7 +1,7 @@
 // snappy diff for Herdr: review a branch like a pull request, without leaving the window.
 import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input, Scrollbar, v_virtual_list, VirtualListScrollHandle } from "gpui-base";
-import { props, closeOverlay, focused, notify, agents, panes, hc, appHome, exec, settings, theme } from "herdr";
+import { props, closeOverlay, focused, notify, agents, panes, hc, appHome, exec, run, settings, theme } from "herdr";
 import * as fs from "fs/promises";
 import * as git from "./git.js";
 import { parsePatch, skippedFiles, firstChange } from "./patch.js";
@@ -723,6 +723,20 @@ export default class SnappyDiff extends View {
     if (overlay) closeOverlay(overlay);
   }
 
+  // t: the review out of the pop-up into its own tab, to keep it open beside the agent. Comments
+  // and viewed files are kept per branch, so it picks up where it was.
+  openInTab() {
+    const s = this.source;
+    if (!s || !props()?.overlay) return;
+    const pr = this.prShown() ? this.pr : null;
+    run("tab.new", {
+      name: (pr ? `#${pr.number} ${pr.title}` : s.head || "Working tree").slice(0, 30),
+      mod: "snappy-diff",
+      props: pr ? { repo: s.repo, pr: pr.number } : { repo: s.repo, base: s.base, head: s.head },
+    });
+    this.close();
+  }
+
   // Overview: the diff at a glance.
 
   openOverview(cx) {
@@ -766,6 +780,7 @@ export default class SnappyDiff extends View {
       "cmd-b": () => this.setPref("sidebar", !this.prefs.sidebar, cx),
       "cmd-k": () => this.openPalette("all", cx),
       "cmd-f": () => this.openPalette("lines", cx),
+      "t": () => this.openInTab(),
       "shift-/": () => this.openMenu("settings", cx),
       "?": () => this.openMenu("settings", cx),
       "escape": () => (this.only ? this.showAll(cx) : this.close()),
@@ -917,6 +932,7 @@ export default class SnappyDiff extends View {
       ["Collapse or expand all files", "", (cx) => this.toggleAll(cx)],
       [`${s.ignoreWhitespace ? "Show" : "Ignore"} whitespace changes`, "", (cx) => this.reload({ ignoreWhitespace: !s.ignoreWhitespace }, cx)],
       ["Reload", "", (cx) => this.reload({}, cx)],
+      ...(props()?.overlay ? [["Open in a tab", "t", () => this.openInTab()]] : []),
       ["Overview", "", (cx) => this.openOverview(cx)],
       [`${this.prefs.wholeFiles ? "Folded" : "Whole"} files`, "", (cx) => this.setWholeFiles(!this.prefs.wholeFiles, cx)],
       ...(this.unsentComments().length ? [["Send comments to GitHub", "", (cx) => this.sendToGitHub(cx)]] : []),
@@ -1115,7 +1131,8 @@ export default class SnappyDiff extends View {
       .when(files.length > 0, (el) => el.child(this.button("overview", icon("chart"), (cx) => this.openOverview(cx), { active: this.overview })))
       .child(this.button("collapse", icon(files.length && files.every((f) => this.isCollapsed(f)) ? "expand" : "collapse"), (cx) => this.toggleAll(cx)))
       .child(this.button("style", icon(this.prefs.diffStyle === "split" ? "split" : "unified"), (cx) => this.setPref("diffStyle", this.prefs.diffStyle === "split" ? "unified" : "split", cx)))
-      .child(this.button("settings", icon("settings"), (cx) => this.openMenu("settings", cx), { active: this.menu === "settings" }));
+      .child(this.button("settings", icon("settings"), (cx) => this.openMenu("settings", cx), { active: this.menu === "settings" }))
+      .when(Boolean(s && props()?.overlay), (el) => el.child(this.button("pop-out", icon("pop-out"), () => this.openInTab())));
   }
 
   renderMenu(t) {
