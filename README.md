@@ -62,6 +62,8 @@ Five columns that follow pstack's loop: Ideas (the backlog), Plan, Work, Review 
 | `⌘Z` / `⌘⇧Z` | Undo / redo |
 | `[` `]` | Switch board |
 | `⇧N` | The board's notes (`esc` back to the cards) |
+| `⇧I` | Import the repository's open issues into Ideas (asks first) |
+| `f` | Send the card's failing CI step to its agent |
 | `b` / `p` / `⇧D` | New board, board for this project, delete board |
 
 ### The `kanban` command
@@ -75,6 +77,7 @@ kanban move pricing work        # a card by number, or a unique part of its text
 kanban link 3 #42               # or "issue #34", or @feature/pricing
 kanban ship 3                   # done works too
 kanban note Ask legal about SAML
+kanban import --mine            # open issues into ideas, once each; or --label <name>
 kanban notes                    # the board's notes
 
 # an agent, inside its branch's checkout
@@ -91,6 +94,7 @@ A native port of [snappy-diff](https://github.com/duartecaldascardoso/snappy-dif
 
 - **Reads like GitHub:** split or unified, syntax highlighting, changed words marked, a file tree with status letters, and the file header pinned while you scroll.
 - **Review:** mark files viewed, comment on a line or a range, and **Send to agent** types the comments, with files, lines and code, into the agent working on that branch. On a pull request, **GitHub** posts them as a review. The copy button puts the prompt on the clipboard.
+- **Reviews from GitHub:** a pull request's open review threads show under their lines, with the conversation and **Resolve**; **N threads** jumps to the next, and **Send to agent** includes them.
 - **Overview:** headline numbers, review time, where the changes are, kinds, the largest files, what deserves a closer look (dependencies, CI, sensitive paths, missing tests) and the commits. `n` reviews in a sensible order: contracts, tests, code, config, docs.
 - **Iterate:** when the commented code changes, it says the comments were addressed; when commits land on a reviewed branch, **N new commits since your review** shows only those.
 - **Less to read:** moved code is faded, generated and huge files start collapsed, and a file opened from go-to or search is shown on its own. Or the opposite: **Whole files** in settings shows every file in full.
@@ -103,7 +107,7 @@ A native port of [snappy-diff](https://github.com/duartecaldascardoso/snappy-dif
 | `v` | Mark file viewed |
 | Click a line number | Comment on it (`⇧`-click for a range) |
 | `o` | Open the file in your editor |
-| `⌘K` | Go to a file, commit or action |
+| `⌘K` | Go to a file, commit, open pull request (reviews asked of you first) or action |
 | `⌘F` | Search the code in the diff |
 | `esc` | Back to all files, or close |
 | Click `⋯ N unmodified lines` | Show the lines it hides |

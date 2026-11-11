@@ -35,6 +35,9 @@ A modal dialog, 92% of the window wide and 82% tall, on the theme's `canvas`, in
 
 - **Notes.** Every board has a free notes page: `shift-n`, or the **Board | Notes** switch in the top row (a segmented control beside the boards; Notes carries a 5px `dim` dot when the board has notes). The page fills the columns' place: a `background` panel with `<board> notes` and the file path (`saving…` while a save is pending), and a soft-wrapping `Textarea` in the code font, focused on opening. It saves 600ms after the last keystroke; a refresh never overwrites notes still being typed, and switching boards saves them first. `esc` goes back to the cards. In the file, notes are everything after `## Notes`, which always comes last: kept exactly as written, headings and lists included, and never read as cards.
 
+- **Issues in.** `shift-i` lists the board's repository's open issues (`gh issue list --state open --limit 200`), asks `Add N open issues to Ideas?`, and appends each one the board doesn't mention anywhere as `<title> issue #<n>` (one undo step). `kanban import [--mine] [--label <name>]` does the same from a terminal.
+- **CI to the agent.** `f` on a card whose pull request's checks fail (and whose branch has an agent) reads `gh pr checks --json name,bucket,link`, takes the first failing check's Actions run from its link, and `gh run view <run> --log-failed`. It keeps the failing step only: from its last `##[group]Run` line to the `##[error]` line, without timestamps or colour codes, cut in the middle past 120 lines. That goes to the agent with `hc send`, framed as "CI is failing on pull request #n (<checks>)… find the cause in this branch, fix it, and push." The hint line offers `f fix CI` when it applies.
+
 ## Built from
 
 - `mods/kanban-md/mod.json`: `place: "none"`, `focusable: true`, overlay `{ kind: "dialog", modal: true, width: 0.92, height: 0.82 }`. `keys.json` binds `cmd-shift-k` to `mod.open:kanban-md`.
