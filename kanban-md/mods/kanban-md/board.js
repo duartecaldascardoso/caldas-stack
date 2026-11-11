@@ -152,3 +152,13 @@ export function withLink(text, token) {
   if (cardLinks(text)?.refs.some((r) => r.n === n)) return text;
   return `${text.trimEnd()} ${token}`;
 }
+
+// Open issues brought into Ideas as "<title> issue #<n>", leaving out any the board already
+// mentions anywhere. Issues: [{ number, title }]. Returns { lanes, added } (added: the new cards).
+export function importIssues(lanes, issues) {
+  const known = new Set(lanes.flat().flatMap((card) => cardLinks(card)?.refs.map((r) => r.n) ?? []));
+  const added = issues
+    .filter((issue) => !known.has(issue.number))
+    .map((issue) => `${issue.title.replace(/\s+/g, " ").trim()} issue #${issue.number}`);
+  return { lanes: lanes.map((lane, i) => (i === 0 ? [...lane, ...added] : lane)), added };
+}

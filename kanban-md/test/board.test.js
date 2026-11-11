@@ -110,3 +110,15 @@ test("notes close the file, are kept as written, and never become cards", async 
   assert.deepEqual(parse(written), parse(text));
   assert.doesNotMatch(serialize("demo", parse(text), "  \n"), /## Notes/);
 });
+
+test("importIssues adds open issues to Ideas once", async () => {
+  const { importIssues } = await import("../mods/kanban-md/board.js");
+  const board = lanes(["Old idea"], ["UK NHS numbers #34"], [], [], ["Done thing issue #30"]);
+  const { lanes: next, added } = importIssues(board, [
+    { number: 34, title: "UK NHS numbers" }, { number: 37, title: "Page-pinned  facts\n" }, { number: 30, title: "Done thing" },
+  ]);
+  assert.deepEqual(added, ["Page-pinned facts issue #37"]);
+  assert.deepEqual(next[0], ["Old idea", "Page-pinned facts issue #37"]);
+  assert.deepEqual(next[1], board[1]);
+  assert.deepEqual(importIssues(next, [{ number: 37, title: "x" }]).added, []);
+});

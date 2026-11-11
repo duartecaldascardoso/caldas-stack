@@ -95,3 +95,14 @@ test("kanban keeps a board's notes and adds to them", () => {
   assert.equal(kanban(dir, "note", "Ask", "about", "SAML").out, "noted on demo: Ask about SAML");
   assert.equal(kanban(dir, "notes").out, "Customers log in with SSO.\nAsk about SAML");
 });
+
+test("kanban import brings open issues into ideas once", () => {
+  const dir = mkdtempSync(join(tmpdir(), "kanban-"));
+  const gh = join(dir, "gh");
+  writeFileSync(gh, '#!/bin/sh\necho \'[{"number":34,"title":"UK NHS numbers"},{"number":37,"title":"Page-pinned facts"}]\'\n', { mode: 0o755 });
+  writeFileSync(join(dir, "demo.md"), "# demo\n\n## Plan\n- UK NHS numbers #34\n");
+  const run = () => execFileSync(BIN, ["-b", "demo", "import"], { env: { ...process.env, KANBAN_DIR: dir, KANBAN_GH: gh } }).toString().trim();
+  assert.equal(run(), "added to ideas:\n  Page-pinned facts issue #37");
+  assert.match(board(dir), /## Ideas\n- Page-pinned facts issue #37\n/);
+  assert.equal(run(), "nothing new: 2 open issues, all on demo already");
+});

@@ -5,7 +5,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync, readdirSync, readFileSync, renameSync, writeFileSync, mkdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, join } from "node:path";
-import { COLUMNS, columnIndex, parse, serialize, notesOf, addCard, editCard, removeCard, withLink } from "../mods/kanban-md/board.js";
+import { COLUMNS, columnIndex, parse, serialize, notesOf, addCard, editCard, removeCard, withLink, importIssues } from "../mods/kanban-md/board.js";
 import { playbookNamed, PLAYBOOK_LIST } from "../mods/kanban-md/work.js";
 import { STEP_STATUSES, parseRuns, recordPlaybook, recordStep, progress } from "../mods/kanban-md/runs.js";
 
@@ -21,6 +21,7 @@ const USAGE = `kanban: plain-text kanban boards in ${DIR.replace(homedir(), "~")
   kanban edit <card> <text>      change a card's text
   kanban link <card> <link>      link a card: #42 (pull request or issue), issue #34, @branch
   kanban rm <card>               delete a card
+  kanban import [--mine] [--label <name>]   the repository's open issues into ideas, once each
   kanban notes                   the board's notes
   kanban note <text>             add a line to the board's notes
 
@@ -152,6 +153,25 @@ export function main(argv) {
   switch (command) {
     case "show":
       return show(board, lanes);
+    case "import": {
+      const args = ["issue", "list", "--state", "open", "--limit", "200", "--json", "number,title"];
+      if (rest.includes("--mine")) args.push("--assignee", "@me");
+      const label = rest.indexOf("--label");
+      if (label >= 0) {
+        if (!rest[label + 1]) fail("give the label: --label <name>");
+        args.push("--label", rest[label + 1]);
+      }
+      let issues;
+      try {
+        issues = JSON.parse(execFileSync(process.env.KANBAN_GH ?? "gh", args, { stdio: ["ignore", "pipe", "pipe"] }).toString());
+      } catch (e) {
+        fail(`couldn't list issues with gh: ${String(e.stderr ?? e.message).trim().split("\n").pop()}`);
+      }
+      const { lanes: next, added } = importIssues(lanes, issues);
+      if (!added.length) return `nothing new: ${issues.length} open issues, all on ${board} already`;
+      save(path, board, next, notes);
+      return `added to ideas:\n${added.map((card) => `  ${card}`).join("\n")}`;
+    }
     case "notes":
       return notes || `no notes on ${board} yet; add one with kanban note <text>`;
     case "note": {

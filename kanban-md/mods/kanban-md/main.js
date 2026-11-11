@@ -3,7 +3,7 @@ import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input, TextareaState, Textarea, Scrollbar, v_virtual_list, VirtualListScrollHandle } from "gpui-base";
 import { home, props, openOverlay, closeOverlay, readTextFile, writeTextFile, exec, focused, notify, run, agents, panes, knownAgents, settings, theme } from "herdr";
 import {
-  COLUMNS, emptyLanes, parse, serialize, notesOf, boardName,
+  COLUMNS, emptyLanes, parse, serialize, notesOf, boardName, importIssues,
   addCard, editCard, removeCard, shiftCard, reorderCard, cardLinks, withoutLinks, withLink,
 } from "./board.js";
 import { prStatus, issueStatus, columnFor, describe, numberFromUrl } from "./links.js";
@@ -40,11 +40,11 @@ const KEYS = {
   "cmd-z": "undo", "cmd-shift-z": "redo",
   "[": "prev-board", "shift-tab": "prev-board", "]": "next-board", "tab": "next-board",
   "b": "new-board", "p": "project-board", "shift-d": "delete-board", "escape": "close",
-  "g": "open-diff", "shift-2": "link", "@": "link", "o": "open-pr", "s": "start-work", "shift-b": "babysit", "i": "inspect", "?": "help", "shift-/": "help", "shift-n": "notes",
+  "g": "open-diff", "shift-2": "link", "@": "link", "o": "open-pr", "s": "start-work", "shift-b": "babysit", "i": "inspect", "?": "help", "shift-/": "help", "shift-n": "notes", "shift-i": "import-issues",
   "1": "column-1", "2": "column-2", "3": "column-3", "4": "column-4", "5": "column-5",
 };
 
-const HINTS = [["?", "how it works"], ["⇧N", "notes"], ["←→↑↓", "move"], ["⇧", "move card"], ["n", "new"], ["e", "edit"], ["d", "delete"], ["⌘Z", "undo"], ["[ ]", "board"], ["b", "new board"], ["⇧D", "delete board"]];
+const HINTS = [["?", "how it works"], ["⇧N", "notes"], ["⇧I", "import issues"], ["←→↑↓", "move"], ["⇧", "move card"], ["n", "new"], ["e", "edit"], ["d", "delete"], ["⌘Z", "undo"], ["[ ]", "board"], ["b", "new board"], ["⇧D", "delete board"]];
 // Each column's dot, from the theme's palette.
 const COLUMN_TINTS = ["ansi5", "ansi4", "ansi3", "ansi6", "ansi2"];
 const alpha = (color, hex) => (/^#[0-9a-f]{6}$/i.test(color) ? color + hex : color);
@@ -78,6 +78,7 @@ export default class Kanban extends View {
     this.confirmingPr = null; // { col, row, branch, repo, title } waiting for y
     this.confirmingStart = null; // { col, row, card, branch, repo, agent } waiting for y
     this.confirmingBabysit = null; // { card, branch, repo, agent, pstack, sit } waiting for y
+    this.confirmingImport = null; // { issues, added } waiting for y
     // this.inspecting: "card" (the selected card's run) or "help" (the loop and every playbook), set above.
     this.detail = null; // the inspected card's { branch, message, commits }
     this.runs = {};
@@ -326,6 +327,14 @@ export default class Kanban extends View {
       cx.stop_propagation();
       return;
     }
+    if (this.confirmingImport) {
+      const ask = this.confirmingImport;
+      this.confirmingImport = null;
+      if (event.keystroke === "y" || event.keystroke === "enter") this.importIssues(ask, cx);
+      cx.notify();
+      cx.stop_propagation();
+      return;
+    }
     if (this.inspecting) {
       const action = KEYS[event.keystroke];
       if (["escape", "i", "?", "shift-/"].includes(event.keystroke)) this.inspecting = null;
@@ -385,6 +394,7 @@ export default class Kanban extends View {
         return cx.notify();
       case "help": this.inspecting = "help"; return cx.notify();
       case "notes": return this.showNotesPage(cx);
+      case "import-issues": return this.askImport(cx);
       case "close": return props()?.overlay && closeOverlay(props().overlay);
       default: {
         const column = action.match(/^column-(\d)$/);
@@ -753,6 +763,38 @@ export default class Kanban extends View {
     this.agentsBefore = now;
   }
 
+  // ⇧I: the repository's open issues into Ideas, once each. Asks first, saying how many.
+  askImport(cx) {
+    const repo = this.repoFor(this.board);
+    if (!repo) {
+      notify({ title: "No repository for this board", body: "Open the board from a terminal inside the project once.", level: "warning" });
+      return;
+    }
+    cx.spawn(async (cx) => {
+      const listed = await exec("gh", ["issue", "list", "--state", "open", "--limit", "200", "--json", "number,title"], { cwd: repo }).catch(() => null);
+      let issues = null;
+      try { issues = listed?.code === 0 ? JSON.parse(listed.stdout) : null; } catch { /* not JSON */ }
+      if (!issues) {
+        notify({ title: "Couldn't list the issues", body: "Is the GitHub CLI (gh) installed and signed in?", level: "error" });
+        return;
+      }
+      const { added } = importIssues(this.lanes, issues);
+      if (!added.length) {
+        notify({ title: "No new issues", body: `All ${issues.length} open issues are on the board already.`, level: "info", timeout: 3000 });
+        return;
+      }
+      this.confirmingImport = { issues, added };
+      cx.notify();
+    });
+  }
+
+  importIssues({ issues }, cx) {
+    const { lanes, added } = importIssues(this.lanes, issues); // against the board as it is now
+    if (!added.length) return;
+    this.apply({ lanes, col: 0, row: lanes[0].length - 1 }, cx);
+    notify({ title: `Added ${added.length} ${added.length === 1 ? "issue" : "issues"} to Ideas`, body: added.slice(0, 3).join(", ") + (added.length > 3 ? "…" : ""), level: "success", timeout: 3000 });
+  }
+
   // Notes: a free page per board, saved as you type.
 
   showNotes(notes) {
@@ -1026,6 +1068,10 @@ export default class Kanban extends View {
       const { branch, agent, card, pstack } = this.confirmingStart;
       const playbook = pstack ? ` with pstack ${playbookOf(withoutLinks(card)).playbook ?? "poteto-mode"}` : "";
       return line.child(div().text_color(t.accent).child(`Start ${agent.name ?? "an agent"}${playbook} on ${branch} in a new worktree?`)).child(this.keys(t, [["y", "start"], ["any key", "cancel"]]));
+    }
+    if (this.confirmingImport) {
+      const n = this.confirmingImport.added.length;
+      return line.child(div().text_color(t.accent).child(`Add ${n} open ${n === 1 ? "issue" : "issues"} to Ideas?`)).child(this.keys(t, [["y", "add"], ["any key", "cancel"]]));
     }
     if (this.confirmingBabysit) {
       const { agent, pstack, sit } = this.confirmingBabysit;
