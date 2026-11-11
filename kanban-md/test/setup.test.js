@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { frontmatter, entryOf, commandName, instructionsOf, firstLine, settingsOf, hooksOf, serversOf, pluginsOf, localChanges, overlaps, setupSummary, definitionsIn, splitHeads } from "../mods/kanban-md/setup.js";
+import { frontmatter, entryOf, commandName, instructionsOf, firstLine, settingsOf, hooksOf, serversOf, pluginsOf, localChanges, overlaps, setupSummary, definitionsIn, splitHeads, editTarget, removeTarget, newDefinition } from "../mods/kanban-md/setup.js";
 
 test("frontmatter reads plain, quoted and block fields", () => {
   const text = "---\nname: shadcn\ndescription: >\n  Manages shadcn components\n  and projects.\nuser-invocable: false\ntitle: \"Quoted: yes\"\n---\n# Body";
@@ -97,4 +97,28 @@ test("hooks and servers carry what the reader shows, without secrets", () => {
   const [server] = serversOf({ mcpServers: { linear: { type: "http", url: "https://mcp.linear.app", headers: { Authorization: "Bearer secret" }, env: { TOKEN: "abc" } } } }, "m.json");
   assert.equal(server.detail, "URL (http):\n\n```\nhttps://mcp.linear.app\n```\n\nEnvironment: TOKEN (values hidden)\nHeaders: Authorization (values hidden)");
   assert.ok(!server.detail.includes("secret") && !server.detail.includes("abc"));
+});
+
+test("editTarget and removeTarget keep plugins, ~/.claude.json and derived rows safe", () => {
+  const skill = { kind: "skills", item: { path: "/r/.claude/skills/deploy/SKILL.md" } };
+  assert.equal(editTarget(skill), "/r/.claude/skills/deploy/SKILL.md");
+  assert.equal(removeTarget(skill), "/r/.claude/skills/deploy");
+  assert.equal(removeTarget({ kind: "commands", item: { path: "/r/.claude/commands/ship.md" } }), "/r/.claude/commands/ship.md");
+  const hook = { kind: "hooks", item: { path: "/r/.claude/settings.json" } };
+  assert.equal(editTarget(hook), "/r/.claude/settings.json");
+  assert.equal(removeTarget(hook), null);
+  assert.equal(editTarget({ kind: "skills", item: { path: "/c/p/skills/x/SKILL.md", from: "pstack" } }), null);
+  assert.equal(removeTarget({ kind: "skills", item: { path: "/c/p/skills/x/SKILL.md", from: "pstack" } }), null);
+  assert.equal(editTarget({ kind: "servers", item: { path: "/Users/me/.claude.json" } }), null);
+  assert.equal(editTarget({ kind: "plugins", item: { path: "/c/p" } }), null);
+});
+
+test("newDefinition writes a skill, command or subagent from a template", () => {
+  assert.deepEqual(newDefinition("/r/.claude", "skills", "Release notes!"), {
+    path: "/r/.claude/skills/release-notes/SKILL.md",
+    text: "---\nname: release-notes\ndescription: What this skill does, and when Claude should use it.\n---\n\n# Release notes!\n\n",
+  });
+  assert.equal(newDefinition("/r/.claude", "commands", "ship it").path, "/r/.claude/commands/ship-it.md");
+  assert.match(newDefinition("/r/.claude", "agents", "Reviewer").text, /^---\nname: reviewer\n/);
+  assert.equal(newDefinition("/r/.claude", "skills", "  !!! "), null);
 });

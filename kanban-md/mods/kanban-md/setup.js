@@ -161,6 +161,39 @@ export function setupSummary(project) {
   return parts.join(", ") + (local ? ` · ${local} not in worktrees` : "");
 }
 
+// The file editing a row changes, or null when it can't be edited here: what a plugin brings
+// (its manager would overwrite it), plugins, and ~/.claude.json, which Claude Code manages. A
+// hook or MCP server is edited in the file that defines it.
+export function editTarget({ kind, item }) {
+  if (item.from || kind === "plugins" || !item.path || item.path.endsWith("/.claude.json")) return null;
+  return item.path;
+}
+
+// What deleting a row moves to the trash, or null: a skill's whole folder, a command's,
+// subagent's or instructions file. Settings, hooks, MCP servers and plugins are changed by
+// editing their file instead.
+export function removeTarget({ kind, item }) {
+  if (item.from || !item.path || !["skills", "commands", "agents", "instructions"].includes(kind)) return null;
+  return kind === "skills" ? item.path.slice(0, item.path.lastIndexOf("/")) : item.path;
+}
+
+// The kinds a new file can be, and their names.
+export const NEW_KINDS = [["skills", "skill"], ["commands", "command"], ["agents", "subagent"]];
+
+// A new skill, command or subagent named `name`: { path, text } under `base` (a .claude folder),
+// or null for a name with nothing usable in it. Names become lowercase-with-dashes.
+export function newDefinition(base, kind, name) {
+  const slug = name.trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+  if (!slug) return null;
+  if (kind === "skills") {
+    return { path: `${base}/skills/${slug}/SKILL.md`, text: `---\nname: ${slug}\ndescription: What this skill does, and when Claude should use it.\n---\n\n# ${name.trim()}\n\n` };
+  }
+  if (kind === "commands") {
+    return { path: `${base}/commands/${slug}.md`, text: `---\ndescription: What /${slug} does.\n---\n\n` };
+  }
+  return { path: `${base}/agents/${slug}.md`, text: `---\nname: ${slug}\ndescription: When Claude should hand work to this subagent.\n---\n\nYou are ` };
+}
+
 // Names defined both for the project and everywhere, per kind: { skills: Set, … }.
 export function overlaps(project, everywhere) {
   const out = {};

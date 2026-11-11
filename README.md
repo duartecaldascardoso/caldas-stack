@@ -47,7 +47,7 @@ The board lives in its own tab, so it keeps following your agents and GitHub whi
 - **Notes:** every board has a free notes page (`⇧N`, or **Notes** in the top bar) for decisions, links and whatever else; it saves as you type, at the end of the board's file under `## Notes`.
 - **Go to:** `⌘K` or `/` finds any card, on this board or another, a board, or an action, as you type.
 - **Archive:** `⇧A` moves what shipped into the board's archive, a markdown file kept by day; **Archive** in the top bar shows it.
-- **Setup:** what agents work with in this project beside what they work with everywhere: instructions (`CLAUDE.md`, `AGENTS.md`), settings, skills, commands, subagents, hooks, MCP servers and plugins. Click one to read it right there (`o` opens it in your editor). It marks what isn't committed, since agents started from cards work in a worktree and won't have it, and names a project skill that also exists everywhere. The card inspector sums it up.
+- **Setup:** what agents work with in this project beside what they work with everywhere: instructions (`CLAUDE.md`, `AGENTS.md`), settings, skills, commands, subagents, hooks, MCP servers and plugins. Click one to read it right there; `e` edits it in place, `d` deletes it (to `~/kanban/.trash`), `n` makes a new skill, command or subagent from a template, and `o` opens it in your editor. What plugins bring stays read-only. It marks what isn't committed, since agents started from cards work in a worktree and won't have it, and names a project skill that also exists everywhere. The card inspector sums it up.
 - **Agents, from the board:** `t` takes you to a card's agent, and the Board tab reads `Board · 1 needs you` while one is blocked.
 - **Follows your theme**, with a progress bar per board.
 
