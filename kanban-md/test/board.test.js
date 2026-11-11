@@ -8,7 +8,7 @@ import {
 const lanes = (...cards) => COLUMNS.map((_, i) => cards[i] ?? []);
 
 test("parse reads cards under each column heading", () => {
-  const text = "# demo\n\n## Ideas\n- one\n- two\n\n## wip\n* three\n";
+  const text = "# demo\n\n## Ideas\n- one\n- two\n\n## work\n* three\n";
   assert.deepEqual(parse(text), lanes(["one", "two"], [], ["three"]));
 });
 
@@ -24,8 +24,15 @@ test("parse of a missing file is an empty board", () => {
 test("serialize writes every column and round-trips", () => {
   const board = lanes(["a"], [], ["b", "c"]);
   const text = serialize("demo", board);
-  assert.equal(text, "# demo\n\n## Ideas\n- a\n\n## Todo\n\n## WIP\n- b\n- c\n\n## Test\n\n## Done\n");
+  assert.equal(text, "# demo\n\n## Ideas\n- a\n\n## Plan\n\n## Work\n- b\n- c\n\n## Review\n\n## Ship\n");
   assert.deepEqual(parse(text), board);
+});
+
+test("boards with the old column names open, and save with the new ones", () => {
+  const old = "# demo\n\n## Todo\n- a\n\n## WIP\n- b\n\n## Test\n- c\n\n## Done\n- d\n";
+  const board = lanes([], ["a"], ["b"], ["c"], ["d"]);
+  assert.deepEqual(parse(old), board);
+  assert.equal(serialize("demo", parse(old)), serialize("demo", board));
 });
 
 test("boardName strips path separators and leading dots", () => {

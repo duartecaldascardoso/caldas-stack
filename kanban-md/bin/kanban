@@ -5,7 +5,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync, readdirSync, readFileSync, renameSync, writeFileSync, mkdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, join } from "node:path";
-import { COLUMNS, parse, serialize, addCard, editCard, removeCard, withLink } from "../mods/kanban-md/board.js";
+import { COLUMNS, columnIndex, parse, serialize, addCard, editCard, removeCard, withLink } from "../mods/kanban-md/board.js";
 import { playbookNamed, PLAYBOOK_LIST } from "../mods/kanban-md/work.js";
 import { STEP_STATUSES, parseRuns, recordPlaybook, recordStep, progress } from "../mods/kanban-md/runs.js";
 
@@ -17,7 +17,7 @@ const USAGE = `kanban: plain-text kanban boards in ${DIR.replace(homedir(), "~")
   kanban boards                  every board
   kanban add <column> <text>     add a card to a column
   kanban move <card> <column>    move a card (by number, or a unique part of its text)
-  kanban done <card>             move a card to done
+  kanban ship <card>             move a card to ship (done works too)
   kanban edit <card> <text>      change a card's text
   kanban link <card> <link>      link a card: #42 (pull request or issue), issue #34, @branch
   kanban rm <card>               delete a card
@@ -28,7 +28,7 @@ const USAGE = `kanban: plain-text kanban boards in ${DIR.replace(homedir(), "~")
   kanban run                     the playbook's steps and where the work stands
 
   -b, --board <name>   the board (default: the git repository you are in, else main)
-  columns: ${COLUMNS.map((c) => c.toLowerCase()).join(", ")}`;
+  columns: ${COLUMNS.map((c) => c.toLowerCase()).join(", ")} (todo, wip, test and done still work)`;
 
 class UsageError extends Error {}
 
@@ -52,7 +52,7 @@ function defaultBoard() {
 }
 
 function columnOf(name) {
-  const col = COLUMNS.findIndex((c) => c.toLowerCase() === String(name ?? "").toLowerCase());
+  const col = columnIndex(name);
   if (col < 0) fail(`unknown column "${name}"; one of: ${COLUMNS.map((c) => c.toLowerCase()).join(", ")}`);
   return col;
 }
@@ -155,9 +155,10 @@ export function main(argv) {
       return change(addCard(lanes, col, text), `added to ${COLUMNS[col].toLowerCase()}: ${text}`);
     }
     case "move":
+    case "ship":
     case "done": {
       const card = findCard(lanes, rest[0]);
-      const to = command === "done" ? COLUMNS.length - 1 : columnOf(rest[1]);
+      const to = command !== "move" ? COLUMNS.length - 1 : columnOf(rest[1]);
       if (to === card.col) return `already in ${COLUMNS[to].toLowerCase()}: ${card.text}`;
       const next = lanes.map((lane, i) => (i === card.col ? lane.filter((_, r) => r !== card.row) : i === to ? [...lane, card.text] : lane));
       return change({ lanes: next }, `moved to ${COLUMNS[to].toLowerCase()}: ${card.text}`);

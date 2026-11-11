@@ -1,13 +1,23 @@
 // The board as data: parsing and writing the markdown file, and the edits the view makes.
 // Pure functions over `lanes` (one array of card strings per column); nothing here touches Herdr.
 
-export const COLUMNS = ["Ideas", "Todo", "WIP", "Test", "Done"];
+// The columns follow pstack's loop: Ideas is the backlog, then Plan, Work, Review and Ship.
+export const COLUMNS = ["Ideas", "Plan", "Work", "Review", "Ship"];
+// The names boards used before, still read so old files open; saving writes the new ones.
+const OLD_NAMES = { todo: 1, wip: 2, test: 3, done: 4 };
+
+// A column's index from its name or old name (case-insensitive), or -1.
+export function columnIndex(name) {
+  const key = String(name ?? "").toLowerCase();
+  const i = COLUMNS.findIndex((c) => c.toLowerCase() === key);
+  return i >= 0 ? i : OLD_NAMES[key] ?? -1;
+}
 
 export function emptyLanes() {
   return COLUMNS.map(() => []);
 }
 
-// "## <column>" starts a lane (case-insensitive), "- " or "* " lines are its cards.
+// "## <column>" starts a lane (case-insensitive, old names too), "- " or "* " lines are its cards.
 // Anything else, including cards under an unknown heading, is ignored.
 export function parse(text) {
   const lanes = emptyLanes();
@@ -15,7 +25,7 @@ export function parse(text) {
   for (const line of (text ?? "").split("\n")) {
     const heading = line.match(/^##\s+(.+?)\s*$/);
     if (heading) {
-      lane = COLUMNS.findIndex((c) => c.toLowerCase() === heading[1].toLowerCase());
+      lane = columnIndex(heading[1]);
       continue;
     }
     const card = line.match(/^\s*[-*]\s+(.*\S)\s*$/);
