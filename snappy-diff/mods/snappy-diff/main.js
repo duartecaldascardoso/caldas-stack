@@ -34,6 +34,10 @@ const RIGHT_MENUS = new Set(["settings", "agent", "kinds"]);
 const EDITORS = { zed: "Zed", vscode: "VS Code", cursor: "Cursor" };
 const SYNTAX = { keyword: "ansi5", string: "ansi2", number: "ansi3", constant: "ansi3", function: "ansi4", type: "ansi6", property: "ansi4" };
 
+// Herdr scales a mod by the person's zoom after layout: sizes and positions it reports are on-screen
+// pixels, while the lengths a mod sets are scaled. Measurements come back through this.
+const unzoom = (px) => px / (settings().zoom || 1);
+const unzoomBounds = (b) => ({ x: unzoom(b.x), y: unzoom(b.y), width: unzoom(b.width), height: unzoom(b.height) });
 const icon = (name, size = 14) => svg(`${ICONS}/${name}.svg`).size(size).flex_none();
 const alpha = (color, hex) => (/^#[0-9a-f]{6}$/i.test(color) ? color + hex : color);
 const plural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
@@ -906,7 +910,7 @@ export default class SnappyDiff extends View {
       .child(h_flex().flex_1().min_h(0)
         .when(this.prefs.sidebar, (el) => el.child(this.renderSidebar(t, active)))
         .child(this.renderMain(t, code, active)))
-      .on_mouse_down("left", (e) => { if (e.bounds) this.viewBounds = e.bounds; })
+      .on_mouse_down("left", (e) => { if (e.bounds) this.viewBounds = unzoomBounds(e.bounds); })
       .when(Boolean(this.menu) && Boolean(this.source), (el) => el.child(this.renderMenu(t)))
       .when(this.overview, (el) => el.child(this.renderOverview(t)))
       .when(Boolean(this.palette), (el) => el.child(this.renderPalette(t)))
@@ -914,7 +918,7 @@ export default class SnappyDiff extends View {
       .child(div().id("probe").absolute().top(-100).left(0).opacity(0).whitespace_nowrap().text_size(CODE_SIZE)
         .when(Boolean(code), (el) => el.font_family(code))
         .on_size_change((size, cx) => {
-          const width = size.width / 100;
+          const width = unzoom(size.width) / 100;
           if (width > 0 && Math.abs(width - this.charW) > 0.01) { this.charW = width; this.rebuild(); cx.notify(); }
         })
         .child("0".repeat(100)));
@@ -922,7 +926,7 @@ export default class SnappyDiff extends View {
 
   // Remembers where a menu's button is, for the menu to drop below it.
   pressAt(event) {
-    if (event.bounds) this.pressed = event.bounds;
+    if (event.bounds) this.pressed = unzoomBounds(event.bounds);
   }
 
   button(id, content, onClick, { active = false } = {}) {
@@ -1079,7 +1083,10 @@ export default class SnappyDiff extends View {
   renderMain(t, code, active) {
     const pinned = this.pinnedFile();
     return v_flex().id("main").flex_1().min_w(0).h_full().relative()
-      .on_size_change((size, cx) => { if (Math.abs(size.width - this.mainW) > 1) { this.mainW = size.width; this.rebuild(); cx.notify(); } })
+      .on_size_change((size, cx) => {
+        const width = unzoom(size.width);
+        if (Math.abs(width - this.mainW) > 1) { this.mainW = width; this.rebuild(); cx.notify(); }
+      })
       .when(!this.files.length, (el) => el.child(this.renderEmpty(t)))
       .when(Boolean(this.only), (el) => el.child(h_flex().id("only").h(32).flex_none().px(16).gap(8).items_center()
         .border_b_1().border_color(t.border).bg(alpha(t.accent, "14")).text_size(12).text_color(t.muted)
@@ -1091,7 +1098,7 @@ export default class SnappyDiff extends View {
       .when(this.files.length > 0, (el) => el
         .child(div().id("diff-wrap").flex_1().min_h(0).relative()
           .on_mouse_down("left", (e) => {
-            if (e.local_position) this.press = { x: e.local_position.x, shift: e.modifiers.shift };
+            if (e.local_position) this.press = { x: unzoom(e.local_position.x), shift: e.modifiers.shift };
             if (!this.editing) this.handle.focus();
           })
           .on_scroll_wheel((_e, cx) => { cx.notify(); cx.timer.after(60, (cx) => cx.notify()); })
@@ -1182,14 +1189,22 @@ export default class SnappyDiff extends View {
       .child(this.renderText(t, cell, m.cols, colors).when(this.moved(item.f, cell), (el) => el.opacity(0.45)));
   }
 
-  // The cell's text, wrapped at `cols` characters, coloured by syntax and word change.
+  // The cell's text, wrapped at `cols` characters, coloured by syntax and word change. Each
+  // coloured piece is placed at its own column: laid side by side, pieces push each other along,
+  // because every piece's width is rounded up to a whole pixel, and a line would outgrow the
+  // width it was wrapped to.
   renderText(t, cell, cols, colors) {
     const lines = [];
     for (const [start, end] of wrapLines(cell.text, cols)) {
-      lines.push(h_flex().h(LINE_H).items_center().whitespace_nowrap().children(segments(cell, start, end).map((s) =>
-        div().text_color(s.kind === "comment" ? t.dim : s.kind === "punctuation" ? t.muted : SYNTAX[s.kind] ? t[SYNTAX[s.kind]] : t.foreground)
+      let column = 0;
+      lines.push(div().relative().h(LINE_H).w_full().children(segments(cell, start, end).map((s) => {
+        const left = column * this.charW;
+        column += s.text.length;
+        return div().absolute().top(0).left(left).h(LINE_H).flex().items_center().whitespace_nowrap()
+          .text_color(s.kind === "comment" ? t.dim : s.kind === "punctuation" ? t.muted : SYNTAX[s.kind] ? t[SYNTAX[s.kind]] : t.foreground)
           .when(s.marked && Boolean(colors.mark), (el) => el.bg(colors.mark).rounded(2))
-          .child(s.text))));
+          .child(s.text);
+      })));
     }
     return v_flex().flex_1().min_w(0).pl(6).children(lines);
   }
@@ -1227,7 +1242,7 @@ export default class SnappyDiff extends View {
     // The pinned copy sits outside the list, so it can have handlers of its own.
     return header.id("pinned").cursor_pointer().on_mouse_down("left", (e, cx) => {
       cx.stop_propagation();
-      if (e.bounds) this.pressHeader(f, this.headerPart(e.bounds.x + e.bounds.width - e.position.x), cx);
+      if (e.bounds) this.pressHeader(f, this.headerPart(unzoom(e.bounds.x + e.bounds.width - e.position.x)), cx);
     });
   }
 

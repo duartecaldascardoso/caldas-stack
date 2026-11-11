@@ -12,6 +12,9 @@ import { parseRuns, recordPlaybook, progress, LOOP, stationOf, lastMessage, ago,
 import { LINE_H, PAD_Y, CHIPS_H, CHIPS_GAP, CHIPS_ROW_GAP, CHIP_GAP, CARD_GAP, INPUT_H, wrapText, cardHeight, chipLayout } from "./cards.js";
 
 const TEXT_SIZE = 13;
+// Herdr scales a mod by the person's zoom after layout: sizes it reports are on-screen pixels,
+// while the lengths a mod sets are scaled. Measurements come back through this.
+const unzoom = (px) => px / (settings().zoom || 1);
 // Card text sits inside: the column's border, the list's 8px sides, the card's border and 12px sides.
 const CARD_INSET = 2 + 16 + 2 + 24;
 // Room the agent's status takes at the end of a card's first line: Herdr's own marks.
@@ -747,7 +750,7 @@ export default class Kanban extends View {
       .child(div().id("probe").absolute().top(-100).left(0).opacity(0).whitespace_nowrap().text_size(TEXT_SIZE)
         .when(Boolean(font), (el) => el.font_family(font))
         .on_size_change((size, cx) => {
-          const width = size.width / 100;
+          const width = unzoom(size.width) / 100;
           if (width > 0 && Math.abs(width - this.charW) > 0.01) { this.charW = width; cx.notify(); }
         })
         .child("0".repeat(100)));
@@ -811,7 +814,8 @@ export default class Kanban extends View {
     return v_flex().id(`col-${c}`).flex_1().min_w(0).h_full().rounded(10).border_1()
       .border_color(active ? alpha(t.accent, "66") : t.border).bg(t.background)
       .when(c === 0, (el) => el.on_size_change((size, cx) => {
-        if (Math.abs(size.width - this.columnW) > 1) { this.columnW = size.width; cx.notify(); }
+        const width = unzoom(size.width);
+        if (Math.abs(width - this.columnW) > 1) { this.columnW = width; cx.notify(); }
       }))
       .on_mouse_down("left", (e) => { this.pressCount = e.click_count; })
       .on_click((_e, cx) => { if (!active) { this.col = c; this.handle.focus(); cx.notify(); } })
