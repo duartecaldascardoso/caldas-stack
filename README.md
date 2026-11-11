@@ -13,7 +13,7 @@ My development environment: a plain-text kanban board to plan work, and a native
 
 ## How it fits
 
-1. **Plan:** a card on the project's board (`⌘⇧K`), or `kanban add` from any terminal.
+1. **Plan:** a card on the project's board (`⌘⇧K`, its own tab), or `kanban add` from any terminal.
 2. **Start:** `s` on a card makes a worktree and branch for it and starts an agent with the card as its task, through a pstack playbook when Claude Code has pstack.
 3. **Follow:** the card shows its agent working, blocked or ready, and the playbook step it's on; `i` shows every step and the agent's last message. When it finishes, a toast opens its diff.
 4. **Review:** comment on lines and **Send to agent**, or post the review to GitHub; `o` on the board opens the pull request, and `⇧B` sets an agent on it until it's merge-ready.
@@ -24,7 +24,7 @@ My development environment: a plain-text kanban board to plan work, and a native
 
 ![kanban-md](kanban-md/preview.png)
 
-Five columns that follow pstack's loop: Ideas (the backlog), Plan, Work, Review and Ship. Boards written with the old todo, wip, test and done headings still open, and save with the new ones. Every board is a markdown file in `~/kanban/<board>.md`, so your editor and your agents can change it too; edits made elsewhere show up within a few seconds.
+The board lives in its own tab, so it keeps following your agents and GitHub while you work: `⌘⇧K` jumps to it from anywhere, on the board of the project you pressed it in. Five columns that follow pstack's loop: Ideas (the backlog), Plan, Work, Review and Ship. Boards written with the old todo, wip, test and done headings still open, and save with the new ones. Every board is a markdown file in `~/kanban/<board>.md`, so your editor and your agents can change it too; edits made elsewhere show up within a few seconds.
 
 ```markdown
 # website
@@ -41,7 +41,7 @@ Five columns that follow pstack's loop: Ideas (the backlog), Plan, Work, Review 
 - **Start work:** `s` makes a worktree on `feature/<card>` (in `~/.herdr/worktrees`, where Herdr nests it under the repository), opens a space there with your agent and the card as its first task, links the card to the branch and moves it to Work. With [pstack](https://github.com/cursor/plugins/tree/main/pstack) in Claude Code (`/plugin marketplace add cursor/plugins`, then `/plugin install pstack@cursor-plugins`), the agent works the card through `/pstack:poteto-mode`. Start a card with `bug:`, `perf:`, `refactor:`, `spike:`, `investigate:` or `feat:` to pick the playbook and the branch (`bug: login fails` is the Bug fix playbook on `fix/login-fails`); without one, poteto-mode picks.
 - **Babysit:** `⇧B` on a card with an open pull request starts an agent in its branch's checkout to get it merge-ready: conflicts reported, review comments answered, checks the diff broke fixed, never merged. With pstack it runs the Babysit playbook, in `drive` mode when conflicts, requested changes or failing checks block the pull request, else `check` for one status pass.
 - **Inspect a card:** `i` shows where the card is on the loop and its playbook's steps as the agent reports them (done, in hand, skipped, with notes), next to the agent's last message, the pull request and the commits on its branch. The card itself shows `4/8 verify`. `?` shows how it works: the loop, who does what at each station, and every playbook's steps.
-- **Agents on cards:** a card shows the agent on its branch (working, blocked, ready, idle). While the board is open, an agent that finishes says the card is ready for review; the toast opens its diff.
+- **Agents on cards:** a card shows the agent on its branch (working, blocked, ready, idle). An agent that finishes says its card is ready for review, on any board; the toast opens its diff.
 - **Links:** `#42` links a card to pull request or issue 42 (GitHub says which; `issue #34` and `PR #42` say it outright) and `@branch` to a branch. A card can have several. It shows a pull request's state (open, draft, merged, closed), checks and review, and an issue's state.
 - **Cards follow GitHub:** opening a pull request moves its card to Review, merging it or completing the issue moves it to Ship.
 - **Notes:** every board has a free notes page (`⇧N`, or **Notes** in the top bar) for decisions, links and whatever else; it saves as you type, at the end of the board's file under `## Notes`.

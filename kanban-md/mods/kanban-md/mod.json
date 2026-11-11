@@ -2,5 +2,5 @@
   "place": "none",
   "title": "Kanban",
   "focusable": true,
-  "overlay": { "kind": "dialog", "modal": true, "width": 0.92, "height": 0.82 }
+  "overlay": { "kind": "popup", "frame": "none", "width": 2, "height": 2 }
 }

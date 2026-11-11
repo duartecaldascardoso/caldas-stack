@@ -1,7 +1,7 @@
 // kanban-md: plain-text kanban boards for Herdr, one markdown file per board in ~/kanban.
 import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input, TextareaState, Textarea, Scrollbar, v_virtual_list, VirtualListScrollHandle } from "gpui-base";
-import { home, props, openOverlay, closeOverlay, readTextFile, writeTextFile, exec, hc, focused, notify, run, agents, panes, knownAgents, settings, theme } from "herdr";
+import { home, props, openOverlay, closeOverlay, readTextFile, writeTextFile, exec, hc, focused, notify, run, agents, panes, spaces, shared, setShared, nextCommand, knownAgents, settings, theme } from "herdr";
 import {
   COLUMNS, emptyLanes, parse, serialize, notesOf, boardName, importIssues,
   addCard, editCard, removeCard, shiftCard, reorderCard, cardLinks, withoutLinks, withLink,
@@ -30,6 +30,8 @@ const STATUS_MS = 60000; // linked pull requests, through gh
 const AGENTS_MS = 2000; // agents finishing their work
 const HISTORY_LIMIT = 200;
 const NOTES_SAVE_MS = 600; // notes save this long after the last keystroke
+const OPENED = "kanban-md.opened"; // { cwd, at }: where ⌘⇧K was pressed, for the board's tab
+const OPENED_MS = 200;
 
 const KEYS = {
   "left": "left", "h": "left", "right": "right", "l": "right",
@@ -60,12 +62,34 @@ function storeBoard(board) {
   try { localStorage.setItem("board", board); } catch { /* not kept: opens the first board next time */ }
 }
 
+// ⌘⇧K opens the board's own tab, so it keeps running: following agents and GitHub, and telling
+// when an agent finishes. The overlay mod.open shows is only a launcher: it selects the tab, or
+// makes it, hands it the folder ⌘⇧K was pressed in, and closes.
+function launch() {
+  const cwd = focused()?.cwd ?? null;
+  const pane = panes().find((p) => p.mod === "kanban-md");
+  if (pane) {
+    setShared(OPENED, { cwd, at: Date.now() });
+    const space = spaces().find((s) => s.tabs.some((t) => t.id === pane.tab));
+    if (space && !space.active) run("space.select", { id: space.id });
+    run("tab.select", { id: pane.tab });
+  } else {
+    run("tab.new", { name: "Board", mod: "kanban-md", props: { cwd } });
+  }
+  closeOverlay(props().overlay);
+}
+
 export default class Kanban extends View {
   init(_props, cx) {
+    if (props()?.overlay && !props()?.view) {
+      this.launcher = true;
+      cx.timer.after(0, () => launch());
+      return;
+    }
     this.inspecting = props()?.view === "help" ? "help" : null; // opened straight into How it works
     this.boards = [];
     this.board = storedBoard() ?? DEFAULT_BOARD;
-    this.project = null; // the focused terminal's git repository name, if any
+    this.project = null; // the git repository ⌘⇧K was pressed in, if any
     this.projectRoot = null; // and its folder
     this.repos = {};
     this.lanes = emptyLanes();
@@ -106,28 +130,46 @@ export default class Kanban extends View {
     cx.spawn(async (cx) => {
       await exec("mkdir", ["-p", DIR]);
       this.repos = JSON.parse(await readTextFile(REPOS).catch(() => null) ?? "{}");
-      this.project = await this.detectProject();
-      if (this.project) await this.rememberRepo(this.project, this.projectRoot);
-      await this.refresh(cx);
-      if (this.boards.includes(this.project)) this.openBoard(this.project, cx);
+      await this.showProject(props()?.cwd ?? focused()?.cwd, cx);
       await this.syncStatuses(cx);
       if (props()?.view === "inspect") await this.inspectCard(props().card, cx);
     });
     cx.timer.every(POLL_MS, (cx) => { if (!this.editing) cx.spawn((cx) => this.refresh(cx)); });
     cx.timer.every(STATUS_MS, (cx) => { if (!this.editing) cx.spawn((cx) => this.syncStatuses(cx)); });
-    cx.timer.every(AGENTS_MS, () => this.noticeFinished());
+    cx.timer.every(AGENTS_MS, (cx) => this.noticeFinished(cx));
+    this.openedAt = shared(OPENED)?.at ?? 0;
+    cx.timer.every(OPENED_MS, (cx) => this.noticeOpened(cx));
+    cx.spawn(async () => { for (;;) if ((await nextCommand()) === "focus" && !this.editing) this.handle.focus(); });
+  }
+
+  // ⌘⇧K again, from another terminal: the board for that project, when it has one.
+  noticeOpened(cx) {
+    const opened = shared(OPENED);
+    if (!opened || opened.at <= this.openedAt) return;
+    this.openedAt = opened.at;
+    if (!this.editing) this.handle.focus();
+    if (opened.cwd) cx.spawn((cx) => this.showProject(opened.cwd, cx));
+  }
+
+  // The project `cwd` is in becomes the board's project, and its board opens if it has one.
+  async showProject(cwd, cx) {
+    this.project = await this.detectProject(cwd);
+    if (this.project) await this.rememberRepo(this.project, this.projectRoot);
+    await this.refresh(cx);
+    if (this.boards.includes(this.project)) this.openBoard(this.project, cx);
+    cx.notify();
   }
 
   // Files
 
-  async detectProject() {
-    const cwd = focused()?.cwd;
+  async detectProject(cwd) {
+    this.projectRoot = null;
     if (!cwd) return null;
     // A worktree belongs to its repository: the project is the main checkout's folder.
     const common = await exec("git", ["-C", cwd, "rev-parse", "--path-format=absolute", "--git-common-dir"]).catch(() => null);
-    const shared = common?.code === 0 ? common.stdout.trim() : "";
+    const gitDir = common?.code === 0 ? common.stdout.trim() : "";
     const git = await exec("git", ["-C", cwd, "rev-parse", "--show-toplevel"]).catch(() => null);
-    const root = shared.endsWith("/.git") ? shared.slice(0, -5) : git?.code === 0 ? git.stdout.trim() : cwd;
+    const root = gitDir.endsWith("/.git") ? gitDir.slice(0, -5) : git?.code === 0 ? git.stdout.trim() : cwd;
     if (root === home() || root === "/") return null;
     this.projectRoot = root;
     return boardName(root.split("/").pop());
@@ -746,22 +788,50 @@ export default class Kanban extends View {
     return branch ? this.agentMap?.get(branch) ?? null : null;
   }
 
-  // While the board is open: an agent that stops working on a card's branch means the card is
-  // ready for review. The toast opens its diff.
-  noticeFinished() {
+  // An agent that stops working on a card's branch means the card is ready for review, on any
+  // board. The toast opens its diff.
+  noticeFinished(cx) {
     const now = agentsByBranch(agents(), panes());
-    const repo = this.repoFor(this.board);
-    for (const branch of finished(this.agentsBefore, now)) {
-      const card = this.lanes.flat().find((c) => this.branchOf(c) === branch);
-      if (!card || !repo) continue;
-      const pr = this.linksOf(card)?.pr;
+    const done = finished(this.agentsBefore, now);
+    this.agentsBefore = now;
+    if (done.length) cx.spawn(async () => this.announceFinished(done, now));
+  }
+
+  async announceFinished(branches, now) {
+    for (const branch of branches) {
+      const found = await this.cardOnBranch(branch);
+      if (!found) continue;
+      const { card, repo, pr } = found;
       notify({
         title: `${withoutLinks(card)} is ready for review`, body: `${now.get(branch).name ?? "The agent"} finished on ${branch}`,
         level: "success", timeout: 8000,
-        action: { name: "tab.new", args: { name: withoutLinks(card).slice(0, 30), mod: "snappy-diff", props: pr ? { repo, pr: pr.n } : { repo, head: branch } } },
+        action: { name: "tab.new", args: { name: withoutLinks(card).slice(0, 30), mod: "snappy-diff", props: pr ? { repo, pr } : { repo, head: branch } } },
       });
     }
-    this.agentsBefore = now;
+  }
+
+  // The card working on `branch`, on the shown board or another: { card, repo, pr }.
+  async cardOnBranch(branch) {
+    const shown = this.lanes.flat().find((c) => this.branchOf(c) === branch);
+    if (shown != null) {
+      const repo = this.repoFor(this.board);
+      return repo ? { card: shown, repo, pr: this.linksOf(shown)?.pr?.n } : null;
+    }
+    for (const board of this.boards) {
+      const repo = this.repoFor(board);
+      if (board === this.board || !repo) continue;
+      const cards = parse(await readTextFile(fileOf(board)).catch(() => null)).flat();
+      const prOf = (card) => cardLinks(card)?.refs.find((r) => r.kind !== "issue")?.n;
+      const named = cards.find((c) => cardLinks(c)?.branch === branch);
+      if (named != null) return { card: named, repo, pr: prOf(named) };
+      // Another board's pull requests aren't followed: ask gh which one is on the branch.
+      if (!cards.some(prOf)) continue;
+      const head = await exec("gh", ["pr", "list", "--head", branch, "--state", "all", "--json", "number", "-q", ".[0].number"], { cwd: repo }).catch(() => null);
+      const n = Number(head?.stdout.trim());
+      const linked = n ? cards.find((c) => prOf(c) === n) : null;
+      if (linked != null) return { card: linked, repo, pr: n };
+    }
+    return null;
   }
 
   // f: a card whose pull request's checks fail sends the end of the failed job's log to the agent
@@ -884,6 +954,7 @@ export default class Kanban extends View {
   // View
 
   render() {
+    if (this.launcher) return div();
     const t = theme();
     const font = settings().font_family;
     this.agentMap = agentsByBranch(agents(), panes());
