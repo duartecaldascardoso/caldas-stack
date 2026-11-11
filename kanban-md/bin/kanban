@@ -5,7 +5,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync, readdirSync, readFileSync, renameSync, writeFileSync, mkdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, join } from "node:path";
-import { COLUMNS, columnIndex, parse, serialize, notesOf, addCard, editCard, removeCard, withLink, importIssues } from "../mods/kanban-md/board.js";
+import { COLUMNS, columnIndex, parse, serialize, notesOf, addCard, editCard, removeCard, withLink, importIssues, parseArchive, archiveCards, localDay } from "../mods/kanban-md/board.js";
 import { playbookNamed, PLAYBOOK_LIST } from "../mods/kanban-md/work.js";
 import { STEP_STATUSES, parseRuns, recordPlaybook, recordStep, progress } from "../mods/kanban-md/runs.js";
 
@@ -21,6 +21,8 @@ const USAGE = `kanban: plain-text kanban boards in ${DIR.replace(homedir(), "~")
   kanban edit <card> <text>      change a card's text
   kanban link <card> <link>      link a card: #42 (pull request or issue), issue #34, @branch
   kanban rm <card>               delete a card
+  kanban archive [card]          move the shipped cards, or one card, to the board's archive
+  kanban archived                the archive, newest day first
   kanban import [--mine] [--label <name>]   the repository's open issues into ideas, once each
   kanban notes                   the board's notes
   kanban note <text>             add a line to the board's notes
@@ -139,6 +141,8 @@ export function main(argv) {
 
   board ??= defaultBoard();
   const runsFile = (name) => join(DIR, ".runs", `${name}.json`);
+  const archivePath = join(DIR, ".archive", `${board}.md`);
+  const archived = existsSync(archivePath) ? readFileSync(archivePath, "utf8") : null;
   const readRuns = (name) => parseRuns(existsSync(runsFile(name)) ? readFileSync(runsFile(name), "utf8") : "");
   const path = join(DIR, `${board}.md`);
   const text = existsSync(path) ? readFileSync(path, "utf8") : "";
@@ -232,6 +236,20 @@ export function main(argv) {
     case "run": {
       const branch = currentBranch();
       return showRun(branch, readRuns(board)[branch]);
+    }
+    case "archive": {
+      const ship = COLUMNS.length - 1;
+      const cards = rest.length ? [findCard(lanes, rest.join(" "))] : lanes[ship].map((text, row) => ({ col: ship, row, text }));
+      if (!cards.length) return `nothing shipped on ${board} to archive`;
+      write(archivePath, archiveCards(archived, board, cards.map((c) => c.text), localDay()));
+      const next = lanes.map((lane, col) => lane.filter((_, row) => !cards.some((c) => c.col === col && c.row === row)));
+      save(path, board, next, notes);
+      return `archived:\n${cards.map((c) => `  ${c.text}`).join("\n")}`;
+    }
+    case "archived": {
+      const days = parseArchive(archived);
+      if (!days.length) return `nothing archived on ${board} yet`;
+      return days.map((d) => [d.day, ...d.cards.map((card) => `  ${card}`)].join("\n")).join("\n\n");
     }
     case "rm": {
       const card = findCard(lanes, rest[0]);

@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import {
   COLUMNS, emptyLanes, parse, serialize, boardName,
   addCard, editCard, removeCard, shiftCard, reorderCard, cardLinks, withoutLinks, withLink,
+  matches, parseArchive, archiveCards,
 } from "../mods/kanban-md/board.js";
 
 const lanes = (...cards) => COLUMNS.map((_, i) => cards[i] ?? []);
@@ -121,4 +122,19 @@ test("importIssues adds open issues to Ideas once", async () => {
   assert.deepEqual(next[0], ["Old idea", "Page-pinned facts issue #37"]);
   assert.deepEqual(next[1], board[1]);
   assert.deepEqual(importIssues(next, [{ number: 37, title: "x" }]).added, []);
+});
+
+test("matches finds every typed word, in any order", () => {
+  assert.equal(matches("Pricing page for teams #42", "teams pric"), true);
+  assert.equal(matches("Pricing page", "pricing dark"), false);
+  assert.equal(matches("Anything", "  "), true);
+});
+
+test("archiveCards keeps a day per heading, newest first, without repeats", () => {
+  let text = archiveCards(null, "web", ["Launch post #42"], "2026-11-10");
+  text = archiveCards(text, "web", ["Pricing page", "Launch post #42"], "2026-11-11");
+  text = archiveCards(text, "web", ["Pricing page", "Domain"], "2026-11-11");
+  assert.equal(text, "# web archive\n\n## 2026-11-11\n- Pricing page\n- Launch post #42\n- Domain\n\n## 2026-11-10\n- Launch post #42\n");
+  assert.deepEqual(parseArchive(text).map((d) => [d.day, d.cards.length]), [["2026-11-11", 3], ["2026-11-10", 1]]);
+  assert.deepEqual(parseArchive(""), []);
 });

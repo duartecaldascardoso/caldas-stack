@@ -162,3 +162,39 @@ export function importIssues(lanes, issues) {
     .map((issue) => `${issue.title.replace(/\s+/g, " ").trim()} issue #${issue.number}`);
   return { lanes: lanes.map((lane, i) => (i === 0 ? [...lane, ...added] : lane)), added };
 }
+
+// Whether a card or name matches what was typed: every word of it, in any order, ignoring case.
+export function matches(text, query) {
+  const haystack = text.toLowerCase();
+  return query.toLowerCase().split(/\s+/).filter(Boolean).every((word) => haystack.includes(word));
+}
+
+// The archive: cards taken off a board, kept in their own markdown file under a heading per day,
+// newest day first. [{ day, cards }], days as "YYYY-MM-DD".
+export function parseArchive(text) {
+  const days = [];
+  for (const line of (text ?? "").split("\n")) {
+    const heading = line.match(/^##\s+(\d{4}-\d{2}-\d{2})\s*$/);
+    if (heading) days.push({ day: heading[1], cards: [] });
+    const card = line.match(/^\s*[-*]\s+(.*\S)\s*$/);
+    if (card && days.length) days.at(-1).cards.push(card[1]);
+  }
+  return days;
+}
+
+// A date's day where it is, "YYYY-MM-DD", for the archive's headings.
+export function localDay(date = new Date()) {
+  const pad = (n) => String(n).padStart(2, "0");
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
+}
+
+// The archive's text with `cards` added under `day`. A card already archived that day isn't
+// added twice, so archiving again after an undo doesn't repeat it.
+export function archiveCards(text, title, cards, day) {
+  const days = parseArchive(text);
+  let today = days.find((d) => d.day === day);
+  if (!today) days.unshift((today = { day, cards: [] }));
+  today.cards.push(...cards.filter((card) => !today.cards.includes(card)));
+  days.sort((a, b) => b.day.localeCompare(a.day));
+  return `# ${title} archive\n` + days.map((d) => `\n## ${d.day}\n` + d.cards.map((card) => `- ${card}\n`).join("")).join("");
+}

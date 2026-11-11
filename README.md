@@ -45,6 +45,9 @@ The board lives in its own tab, so it keeps following your agents and GitHub whi
 - **Links:** `#42` links a card to pull request or issue 42 (GitHub says which; `issue #34` and `PR #42` say it outright) and `@branch` to a branch. A card can have several. It shows a pull request's state (open, draft, merged, closed), checks and review, and an issue's state.
 - **Cards follow GitHub:** opening a pull request moves its card to Review, merging it or completing the issue moves it to Ship.
 - **Notes:** every board has a free notes page (`⇧N`, or **Notes** in the top bar) for decisions, links and whatever else; it saves as you type, at the end of the board's file under `## Notes`.
+- **Go to:** `⌘K` or `/` finds any card, on this board or another, a board, or an action, as you type.
+- **Archive:** `⇧A` moves what shipped into the board's archive, a markdown file kept by day; **Archive** in the top bar shows it.
+- **Agents, from the board:** `t` takes you to a card's agent, and the Board tab reads `Board · 1 needs you` while one is blocked.
 - **Follows your theme**, with a progress bar per board.
 
 | Key | Action |
@@ -56,12 +59,15 @@ The board lives in its own tab, so it keeps following your agents and GitHub whi
 | `g` | Open the card's pull request or branch in snappy-diff, or its issue in the browser |
 | `s` | Start work: a worktree, a branch and an agent for the card (asks first) |
 | `i` | Inspect the card: its place on the loop, its playbook's steps, its agent's last message |
+| `⌘K` or `/` | Go to a card, board or action |
+| `t` | Go to the card's agent |
 | `?` | How it works: the loop and every playbook |
 | `⇧B` | Babysit the card's pull request to merge-ready (asks first) |
 | `o` | Push the card's branch and open a pull request titled like the card, closing its issue (asks first) |
 | `⌘Z` / `⌘⇧Z` | Undo / redo |
 | `[` `]` | Switch board |
 | `⇧N` | The board's notes (`esc` back to the cards) |
+| `⇧A` | Archive the shipped cards (asks first) |
 | `⇧I` | Import the repository's open issues into Ideas (asks first) |
 | `f` | Send the card's failing CI step to its agent |
 | `b` / `p` / `⇧D` | New board, board for this project, delete board |
@@ -79,6 +85,8 @@ kanban ship 3                   # done works too
 kanban note Ask legal about SAML
 kanban import --mine            # open issues into ideas, once each; or --label <name>
 kanban notes                    # the board's notes
+kanban archive                  # the shipped cards into the archive; or one card
+kanban archived                 # the archive, newest day first
 
 # an agent, inside its branch's checkout
 kanban playbook bug             # the pstack playbook it follows
@@ -99,6 +107,7 @@ A native port of [snappy-diff](https://github.com/duartecaldascardoso/snappy-dif
 - **Iterate:** when the commented code changes, it says the comments were addressed; when commits land on a reviewed branch, **N new commits since your review** shows only those.
 - **Less to read:** moved code is faded, generated and huge files start collapsed, and a file opened from go-to or search is shown on its own. Or the opposite: **Whole files** in settings shows every file in full.
 - **Live:** uncommitted changes refresh every two seconds. Viewed files and comments are kept per branch.
+- **Pop out:** a long review moves from the pop-up into its own tab (`t`, or the button at the toolbar's end), to sit beside the agent.
 
 | Key | Action |
 | --- | --- |
@@ -108,6 +117,7 @@ A native port of [snappy-diff](https://github.com/duartecaldascardoso/snappy-dif
 | Click a line number | Comment on it (`⇧`-click for a range) |
 | `o` | Open the file in your editor |
 | `⌘K` | Go to a file, commit, open pull request (reviews asked of you first) or action |
+| `t` | Open the review in its own tab |
 | `⌘F` | Search the code in the diff |
 | `esc` | Back to all files, or close |
 | Click `⋯ N unmodified lines` | Show the lines it hides |

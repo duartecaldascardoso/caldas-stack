@@ -5,6 +5,7 @@ import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { localDay } from "../mods/kanban-md/board.js";
 
 const BIN = fileURLToPath(new URL("../bin/kanban", import.meta.url));
 
@@ -105,4 +106,18 @@ test("kanban import brings open issues into ideas once", () => {
   assert.equal(run(), "added to ideas:\n  Page-pinned facts issue #37");
   assert.match(board(dir), /## Ideas\n- Page-pinned facts issue #37\n/);
   assert.equal(run(), "nothing new: 2 open issues, all on demo already");
+});
+
+test("kanban archives the shipped cards, or one card, by day", () => {
+  const dir = mkdtempSync(join(tmpdir(), "kanban-"));
+  kanban(dir, "add", "ship", "Launch post");
+  kanban(dir, "add", "ship", "Domain");
+  kanban(dir, "add", "work", "Pricing");
+  assert.equal(kanban(dir, "archive", "pricing").out, "archived:\n  Pricing");
+  assert.equal(kanban(dir, "archive").out, "archived:\n  Launch post\n  Domain");
+  assert.equal(board(dir), "# demo\n\n## Ideas\n\n## Plan\n\n## Work\n\n## Review\n\n## Ship\n");
+  const day = localDay();
+  assert.equal(readFileSync(join(dir, ".archive", "demo.md"), "utf8"), `# demo archive\n\n## ${day}\n- Pricing\n- Launch post\n- Domain\n`);
+  assert.equal(kanban(dir, "archived").out, `${day}\n  Pricing\n  Launch post\n  Domain`);
+  assert.equal(kanban(dir, "archive").out, "nothing shipped on demo to archive");
 });

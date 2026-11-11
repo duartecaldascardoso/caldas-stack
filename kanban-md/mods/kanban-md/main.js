@@ -1,28 +1,30 @@
 // kanban-md: plain-text kanban boards for Herdr, one markdown file per board in ~/kanban.
 import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input, TextareaState, Textarea, Scrollbar, v_virtual_list, VirtualListScrollHandle } from "gpui-base";
-import { home, props, openOverlay, closeOverlay, readTextFile, writeTextFile, exec, hc, focused, notify, run, agents, panes, spaces, shared, setShared, nextCommand, knownAgents, settings, theme } from "herdr";
+import { home, props, openOverlay, closeOverlay, readTextFile, writeTextFile, exec, hc, focused, notify, run, agents, panes, spaces, shared, setShared, nextCommand, settings, theme } from "herdr";
 import {
-  COLUMNS, emptyLanes, parse, serialize, notesOf, boardName, importIssues,
+  COLUMNS, emptyLanes, parse, serialize, notesOf, boardName, importIssues, matches, parseArchive, archiveCards, localDay,
   addCard, editCard, removeCard, shiftCard, reorderCard, cardLinks, withoutLinks, withLink,
 } from "./board.js";
-import { prStatus, issueStatus, columnFor, describe, numberFromUrl, failedChecks, ciPrompt } from "./links.js";
-import { branchFor, worktreePath, cardBranch, agentsByBranch, finished, checkoutOf, playbookOf, taskFor, hasPstack, babysitFor, babysitTask, playbookNamed, PLAYBOOK_LIST } from "./work.js";
-import { parseRuns, recordPlaybook, progress, LOOP, stationOf, lastMessage, ago, summarize } from "./runs.js";
-import { LINE_H, PAD_Y, CHIPS_H, CHIPS_GAP, CHIPS_ROW_GAP, CHIP_GAP, CARD_GAP, INPUT_H, wrapText, cardHeight, chipLayout } from "./cards.js";
+import { columnFor, describe, ciPrompt } from "./links.js";
+import { branchFor, cardBranch, agentsByBranch, finished, playbookOf, taskFor, babysitFor, babysitTask, playbookNamed, PLAYBOOK_LIST } from "./work.js";
+import { parseRuns, recordPlaybook } from "./runs.js";
+import { PAD_Y, CHIPS_GAP, CARD_GAP, INPUT_H, LINE_H, wrapText, cardHeight, chipLayout, chipsOf } from "./cards.js";
+import { projectOf, isRepository, currentBranch, commitsAhead, push, checkout } from "./git.js";
+import { statusesOf, currentPullRequest, pullRequestFrom, createPullRequest, openIssues, showIssue, failedRun } from "./github.js";
+import { pickAgent, lastAgentMessage } from "./agents.js";
+import { alpha, unzoom, keycaps, sectionLabel, agentMark, chipRowsView } from "./ui.js";
+import { helpView, cardRunView } from "./inspector.js";
 
 const TEXT_SIZE = 13;
-// Herdr scales a mod by the person's zoom after layout: sizes it reports are on-screen pixels,
-// while the lengths a mod sets are scaled. Measurements come back through this.
-const unzoom = (px) => px / (settings().zoom || 1);
 // Card text sits inside: the column's border, the list's 8px sides, the card's border and 12px sides.
 const CARD_INSET = 2 + 16 + 2 + 24;
 // Room the agent's status takes at the end of a card's first line: Herdr's own marks.
-const TRACK_LABEL = 84; // the you / board / agent labels in How it works
 const markWidth = (agent) => (!agent ? 0 : agent.status === "blocked" ? 76 : 20);
 
 const DIR = `${home()}/kanban`;
 const TRASH = `${DIR}/.trash`;
+const ARCHIVE = `${DIR}/.archive`; // each board's archived cards, <board>.md
 const REPOS = `${DIR}/.repos.json`; // board name -> repository folder, learnt from project boards
 const DEFAULT_BOARD = "main";
 const POLL_MS = 3000; // picks up edits made to the files elsewhere
@@ -43,16 +45,19 @@ const KEYS = {
   "[": "prev-board", "shift-tab": "prev-board", "]": "next-board", "tab": "next-board",
   "b": "new-board", "p": "project-board", "shift-d": "delete-board", "escape": "close",
   "g": "open-diff", "shift-2": "link", "@": "link", "o": "open-pr", "s": "start-work", "shift-b": "babysit", "i": "inspect", "?": "help", "shift-/": "help", "shift-n": "notes", "shift-i": "import-issues", "f": "fix-ci",
+  "t": "go-to-agent", "shift-a": "archive", "cmd-k": "palette", "/": "palette",
   "1": "column-1", "2": "column-2", "3": "column-3", "4": "column-4", "5": "column-5",
 };
 
-const HINTS = [["?", "how it works"], ["⇧N", "notes"], ["⇧I", "import issues"], ["←→↑↓", "move"], ["⇧", "move card"], ["n", "new"], ["e", "edit"], ["d", "delete"], ["⌘Z", "undo"], ["[ ]", "board"], ["b", "new board"], ["⇧D", "delete board"]];
+const HINTS = [["⌘K", "go to"], ["?", "how it works"], ["⇧N", "notes"], ["⇧I", "import issues"], ["←→↑↓", "move"], ["⇧", "move card"], ["n", "new"], ["e", "edit"], ["d", "delete"], ["⌘Z", "undo"], ["[ ]", "board"], ["b", "new board"], ["⇧D", "delete board"]];
 // Each column's dot, from the theme's palette.
 const COLUMN_TINTS = ["ansi5", "ansi4", "ansi3", "ansi6", "ansi2"];
-const alpha = (color, hex) => (/^#[0-9a-f]{6}$/i.test(color) ? color + hex : color);
+const NO_REPO = { title: "No repository for this board", body: "Open the board from a terminal inside the project once.", level: "warning" };
 
 const fileOf = (board) => `${DIR}/${board}.md`;
+const archiveOf = (board) => `${ARCHIVE}/${board}.md`;
 const runsOf = (board) => `${DIR}/.runs/${board}.json`; // what agents report about their playbooks
+const plural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
 
 function storedBoard() {
   try { return localStorage.getItem("board"); } catch { return null; }
@@ -86,11 +91,9 @@ export default class Kanban extends View {
       cx.timer.after(0, () => launch());
       return;
     }
-    this.inspecting = props()?.view === "help" ? "help" : null; // opened straight into How it works
     this.boards = [];
     this.board = storedBoard() ?? DEFAULT_BOARD;
-    this.project = null; // the git repository ⌘⇧K was pressed in, if any
-    this.projectRoot = null; // and its folder
+    this.project = null; // the project ⌘⇧K was pressed in: { name, root }, or null
     this.repos = {};
     this.lanes = emptyLanes();
     this.raw = null; // the file as last read or written, to detect edits made elsewhere
@@ -98,23 +101,28 @@ export default class Kanban extends View {
     this.rows = COLUMNS.map(() => 0);
     this.history = {}; // board -> { undo: [lanes], redo: [lanes] }
     this.editing = null; // { kind: "card", col, row } (row null: a new card) or { kind: "board" }
-    this.confirmingDelete = false;
-    this.confirmingPr = null; // { col, row, branch, repo, title } waiting for y
-    this.confirmingStart = null; // { col, row, card, branch, repo, agent } waiting for y
-    this.confirmingBabysit = null; // { card, branch, repo, agent, pstack, sit } waiting for y
-    this.confirmingImport = null; // { issues, added } waiting for y
-    // this.inspecting: "card" (the selected card's run) or "help" (the loop and every playbook), set above.
+    this.ask = null; // a question on the hint line waiting for y: { prompt, yes, danger, run(cx) }
+    // "card" (the selected card's run) or "help" (the loop and every playbook), in place of the columns.
+    this.inspecting = props()?.view === "help" ? "help" : null;
+    this.helpIndex = 0;
     this.detail = null; // the inspected card's { branch, message, commits }
     this.runs = {};
     this.agentsBefore = agentsByBranch(agents(), panes());
-    this.statuses = new Map(); // "<repo>#<number>" -> prStatus
+    this.statuses = new Map(); // "<repo>#<number>" -> prStatus or issueStatus
 
     // Each column is a virtual list, so moving the cursor can scroll its card into view.
     this.scrolls = COLUMNS.map(() => VirtualListScrollHandle.new());
     this.columnW = 0; // measured
     this.charW = TEXT_SIZE * 0.6; // measured from the code font
     // Free notes, one page per board, kept at the end of its file under "## Notes".
-    this.view = props()?.view === "notes" ? "notes" : "board";
+    this.view = props()?.view === "notes" ? "notes" : "board"; // or "archive"
+    this.archived = []; // the board's archive, [{ day, cards }], read when it's shown
+    // Go to (⌘K): cards on every board, boards and actions, filtered as you type.
+    this.palette = false;
+    this.paletteIndex = 0;
+    this.everything = []; // every board's cards, [{ board, lanes }], read when go-to opens
+    this.paletteInput = InputState.new({ placeholder: "Go to a card, board or action" });
+    this.paletteInput.on("change", (_e, cx) => { this.paletteIndex = 0; cx.notify(); });
     this.notes = "";
     this.notesPending = false; // typed but not saved yet: a refresh mustn't overwrite it
     this.notesTyped = 0;
@@ -139,7 +147,15 @@ export default class Kanban extends View {
     cx.timer.every(AGENTS_MS, (cx) => this.noticeFinished(cx));
     this.openedAt = shared(OPENED)?.at ?? 0;
     cx.timer.every(OPENED_MS, (cx) => this.noticeOpened(cx));
-    cx.spawn(async () => { for (;;) if ((await nextCommand()) === "focus" && !this.editing) this.handle.focus(); });
+    cx.spawn(async () => { for (;;) if ((await nextCommand()) === "focus") this.focusBoard(); });
+  }
+
+  // The board takes the keyboard, unless something on it is being typed into.
+  focusBoard() {
+    if (this.editing) this.input.focus();
+    else if (this.palette) this.paletteInput.focus();
+    else if (this.view === "notes") this.notesInput.focus();
+    else this.handle.focus();
   }
 
   // ⌘⇧K again, from another terminal: the board for that project, when it has one.
@@ -147,33 +163,20 @@ export default class Kanban extends View {
     const opened = shared(OPENED);
     if (!opened || opened.at <= this.openedAt) return;
     this.openedAt = opened.at;
-    if (!this.editing) this.handle.focus();
+    this.focusBoard();
     if (opened.cwd) cx.spawn((cx) => this.showProject(opened.cwd, cx));
   }
 
   // The project `cwd` is in becomes the board's project, and its board opens if it has one.
   async showProject(cwd, cx) {
-    this.project = await this.detectProject(cwd);
-    if (this.project) await this.rememberRepo(this.project, this.projectRoot);
+    this.project = await projectOf(cwd);
+    if (this.project) await this.rememberRepo(this.project.name, this.project.root);
     await this.refresh(cx);
-    if (this.boards.includes(this.project)) this.openBoard(this.project, cx);
+    if (this.project && this.boards.includes(this.project.name)) this.openBoard(this.project.name, cx);
     cx.notify();
   }
 
   // Files
-
-  async detectProject(cwd) {
-    this.projectRoot = null;
-    if (!cwd) return null;
-    // A worktree belongs to its repository: the project is the main checkout's folder.
-    const common = await exec("git", ["-C", cwd, "rev-parse", "--path-format=absolute", "--git-common-dir"]).catch(() => null);
-    const gitDir = common?.code === 0 ? common.stdout.trim() : "";
-    const git = await exec("git", ["-C", cwd, "rev-parse", "--show-toplevel"]).catch(() => null);
-    const root = gitDir.endsWith("/.git") ? gitDir.slice(0, -5) : git?.code === 0 ? git.stdout.trim() : cwd;
-    if (root === home() || root === "/") return null;
-    this.projectRoot = root;
-    return boardName(root.split("/").pop());
-  }
 
   async refresh(cx) {
     const ls = await exec("ls", [DIR]);
@@ -211,8 +214,12 @@ export default class Kanban extends View {
 
   // Boards
 
-  openBoard(board, cx) {
-    if (board === this.board) return;
+  // Opens a board, the cursor on `at` ({ col, row }) or the first card.
+  openBoard(board, cx, at = null) {
+    if (board === this.board) {
+      if (at) { this.col = at.col; this.rows[at.col] = at.row; cx.notify(); }
+      return;
+    }
     // Notes typed a moment ago belong to the board they were typed on: save them first.
     if (this.notesPending) {
       this.notesTyped++;
@@ -222,9 +229,12 @@ export default class Kanban extends View {
     this.board = board;
     this.raw = null;
     this.lanes = emptyLanes();
-    this.col = 0;
-    this.rows = COLUMNS.map(() => 0);
-    this.confirmingDelete = false;
+    // The rows survive the read: refresh only clamps them to the board's cards.
+    this.col = at?.col ?? 0;
+    this.rows = COLUMNS.map((_, c) => (c === at?.col ? at.row : 0));
+    this.ask = null;
+    this.archived = [];
+    if (this.view === "archive") cx.spawn((cx) => this.loadArchive(cx));
     storeBoard(board);
     cx.spawn(async (cx) => { await this.refresh(cx); await this.syncStatuses(cx); });
     cx.notify();
@@ -249,7 +259,6 @@ export default class Kanban extends View {
   // Moves the file to ~/kanban/.trash rather than deleting it.
   deleteBoard(cx) {
     const board = this.board;
-    this.confirmingDelete = false;
     delete this.history[board];
     this.boards = this.boards.filter((b) => b !== board);
     this.openBoard(this.boards[0] ?? DEFAULT_BOARD, cx);
@@ -262,19 +271,28 @@ export default class Kanban extends View {
 
   // Cards
 
+  selected() {
+    return this.lanes[this.col][this.rows[this.col]] ?? null;
+  }
+
   // Applies an edit from board.js: keeps the previous lanes for undo, moves the cursor, saves.
   apply(result, cx) {
     if (!result) return;
-    const history = (this.history[this.board] ??= { undo: [], redo: [] });
-    history.undo.push(this.lanes);
-    if (history.undo.length > HISTORY_LIMIT) history.undo.shift();
-    history.redo = [];
+    this.remember();
     this.lanes = result.lanes;
     this.col = result.col;
     this.rows[result.col] = result.row;
     this.clampRows();
     this.save(cx);
     cx.notify();
+  }
+
+  // Keeps the lanes as they are for undo, before they change.
+  remember() {
+    const history = (this.history[this.board] ??= { undo: [], redo: [] });
+    history.undo.push(this.lanes);
+    if (history.undo.length > HISTORY_LIMIT) history.undo.shift();
+    history.redo = [];
   }
 
   travel(from, to, cx) {
@@ -331,7 +349,9 @@ export default class Kanban extends View {
   // Keys
 
   onKey(event, cx) {
-    if (this.view === "notes") {
+    if (this.palette) return this.paletteKey(event.keystroke, cx);
+    if (event.keystroke === "cmd-k") { this.openPalette(cx); cx.stop_propagation(); return; }
+    if (this.view !== "board") {
       if (event.key === "escape") { this.showBoard(cx); cx.stop_propagation(); }
       return;
     }
@@ -339,40 +359,10 @@ export default class Kanban extends View {
       if (event.key === "escape") { this.stopEdit(cx); cx.stop_propagation(); }
       return;
     }
-    if (this.confirmingDelete) {
-      if (event.keystroke === "y" || event.keystroke === "enter") this.deleteBoard(cx);
-      else { this.confirmingDelete = false; cx.notify(); }
-      cx.stop_propagation();
-      return;
-    }
-    if (this.confirmingPr) {
-      const ask = this.confirmingPr;
-      this.confirmingPr = null;
-      if (event.keystroke === "y" || event.keystroke === "enter") this.openPullRequest(ask, cx);
-      cx.notify();
-      cx.stop_propagation();
-      return;
-    }
-    if (this.confirmingStart) {
-      const ask = this.confirmingStart;
-      this.confirmingStart = null;
-      if (event.keystroke === "y" || event.keystroke === "enter") this.startWork(ask, cx);
-      cx.notify();
-      cx.stop_propagation();
-      return;
-    }
-    if (this.confirmingBabysit) {
-      const ask = this.confirmingBabysit;
-      this.confirmingBabysit = null;
-      if (event.keystroke === "y" || event.keystroke === "enter") this.babysit(ask, cx);
-      cx.notify();
-      cx.stop_propagation();
-      return;
-    }
-    if (this.confirmingImport) {
-      const ask = this.confirmingImport;
-      this.confirmingImport = null;
-      if (event.keystroke === "y" || event.keystroke === "enter") this.importIssues(ask, cx);
+    if (this.ask) {
+      const ask = this.ask;
+      this.ask = null;
+      if (event.keystroke === "y" || event.keystroke === "enter") ask.run(cx);
       cx.notify();
       cx.stop_propagation();
       return;
@@ -381,12 +371,11 @@ export default class Kanban extends View {
       const action = KEYS[event.keystroke];
       if (["escape", "i", "?", "shift-/"].includes(event.keystroke)) this.inspecting = null;
       else if (this.inspecting === "help" && (action === "up" || action === "down")) {
-        this.helpIndex = ((this.helpIndex ?? 0) + (action === "up" ? -1 : 1) + PLAYBOOK_LIST.length) % PLAYBOOK_LIST.length;
+        this.helpIndex = (this.helpIndex + (action === "up" ? -1 : 1) + PLAYBOOK_LIST.length) % PLAYBOOK_LIST.length;
       } else if (this.inspecting === "card" && ["up", "down", "left", "right"].includes(action)) {
         // Other cards: the inspector follows the cursor.
         this.perform(action, cx);
-        this.detail = null;
-        cx.spawn(async (cx) => { await this.loadDetail(); cx.notify(); });
+        this.inspect(cx);
       }
       cx.notify();
       cx.stop_propagation();
@@ -401,8 +390,9 @@ export default class Kanban extends View {
   perform(action, cx) {
     const { lanes, col } = this;
     const row = this.rows[col];
+    const card = this.selected();
     const newCard = () => this.startEdit({ kind: "card", col, row: null }, "", cx);
-    const editSelected = () => lanes[col].length && this.startEdit({ kind: "card", col, row }, lanes[col][row], cx);
+    const editSelected = () => card != null && this.startEdit({ kind: "card", col, row }, card, cx);
     switch (action) {
       case "left": return this.moveCursor(-1, 0, cx);
       case "right": return this.moveCursor(1, 0, cx);
@@ -414,30 +404,32 @@ export default class Kanban extends View {
       case "shift-down": return this.apply(reorderCard(lanes, col, row, 1), cx);
       case "new": return newCard();
       case "edit": return editSelected();
-      case "open-card": return lanes[col].length ? editSelected() : newCard();
+      case "open-card": return card != null ? editSelected() : newCard();
       case "delete": return this.apply(removeCard(lanes, col, row), cx);
       case "undo": return this.travel("undo", "redo", cx);
       case "redo": return this.travel("redo", "undo", cx);
       case "prev-board": return this.cycleBoard(-1, cx);
       case "next-board": return this.cycleBoard(1, cx);
       case "new-board": return this.startEdit({ kind: "board" }, "", cx);
-      case "project-board": return this.project && this.createBoard(this.project, cx);
-      case "delete-board": this.confirmingDelete = true; return cx.notify();
-      case "open-diff": return this.openDiff(lanes[col][row]);
-      case "link": return this.linkBranch(cx);
-      case "open-pr": return this.askPullRequest(cx);
-      case "start-work": return this.askStartWork(cx);
-      case "babysit": return this.askBabysit(cx);
+      case "project-board": return this.project && this.createBoard(this.project.name, cx);
+      case "delete-board":
+        return this.askFor({ prompt: `Delete board "${this.board}"?`, yes: "delete", danger: true, run: (cx) => this.deleteBoard(cx) }, cx);
+      case "open-diff": return card != null && this.openDiff(card);
+      case "link": return card != null && this.linkBranch(card, cx);
+      case "open-pr": return card != null && this.askPullRequest(card, cx);
+      case "start-work": return card != null && this.askStartWork(card, cx);
+      case "babysit": return card != null && this.askBabysit(card, cx);
+      case "fix-ci": return card != null && this.fixCi(card, cx);
+      case "go-to-agent": return card != null && this.goToAgent(card);
+      case "archive": return this.askArchive(cx);
+      case "palette": return this.openPalette(cx);
       case "inspect":
-        if (lanes[col][row] == null) return;
+        if (card == null) return;
         this.inspecting = "card";
-        this.detail = null;
-        cx.spawn(async (cx) => { await this.loadDetail(); cx.notify(); });
-        return cx.notify();
+        return this.inspect(cx);
       case "help": this.inspecting = "help"; return cx.notify();
       case "notes": return this.showNotesPage(cx);
       case "import-issues": return this.askImport(cx);
-      case "fix-ci": return this.fixCi(lanes[col][row], cx);
       case "close": return props()?.overlay && closeOverlay(props().overlay);
       default: {
         const column = action.match(/^column-(\d)$/);
@@ -446,10 +438,16 @@ export default class Kanban extends View {
     }
   }
 
+  // Puts a question on the hint line; y runs it, any other key drops it.
+  askFor(ask, cx) {
+    this.ask = ask;
+    cx.notify();
+  }
+
   // Links: a card's pull request or branch opens in snappy-diff.
 
   repoFor(board) {
-    return this.repos[board] ?? (board === this.project ? this.projectRoot : null);
+    return this.repos[board] ?? (board === this.project?.name ? this.project.root : null);
   }
 
   async rememberRepo(board, folder) {
@@ -463,14 +461,13 @@ export default class Kanban extends View {
   // like the board, inside or next to the current project (~/code/app's board "api" finds
   // ~/code/api, and a folder of projects that is itself a repository finds its children).
   async findRepo(board) {
-    if (this.repoFor(board) || !this.projectRoot) return this.repoFor(board);
-    const parent = this.projectRoot.slice(0, this.projectRoot.lastIndexOf("/"));
-    for (const folder of [`${this.projectRoot}/${board}`, `${parent}/${board}`]) {
-      const top = await exec("git", ["-C", folder, "rev-parse", "--show-toplevel"]).catch(() => null);
-      if (top?.code === 0 && top.stdout.trim() === folder) {
-        await this.rememberRepo(board, folder);
-        return folder;
-      }
+    const root = this.project?.root;
+    if (this.repoFor(board) || !root) return this.repoFor(board);
+    const parent = root.slice(0, root.lastIndexOf("/"));
+    for (const folder of [`${root}/${board}`, `${parent}/${board}`]) {
+      if (!(await isRepository(folder))) continue;
+      await this.rememberRepo(board, folder);
+      return folder;
     }
     return null;
   }
@@ -496,35 +493,29 @@ export default class Kanban extends View {
     const links = this.linksOf(card);
     if (!links) return;
     const repo = this.repoFor(this.board);
-    if (!repo) {
-      notify({ title: "No repository for this board", body: "Open the board from a terminal inside the project once.", level: "warning" });
-      return;
-    }
+    if (!repo) { notify(NO_REPO); return; }
     const branch = this.branchOf(card);
-    if (!links.pr && !branch && links.issue) {
-      exec("gh", ["issue", "view", String(links.issue.n), "--web"], { cwd: repo }).catch(() => {});
+    if (!links.pr && !branch) {
+      if (links.issue) showIssue(repo, links.issue.n);
       return;
     }
-    if (!links.pr && !branch) return;
     openOverlay({
       mod: "snappy-diff", kind: "dialog", modal: true, width: 0.96, height: 0.92,
       props: links.pr ? { repo, pr: links.pr.n } : { repo, head: branch },
     });
   }
 
-  // @: links the selected card to the branch its board's repository is on, and to that
-  // branch's pull request when it has one.
-  linkBranch(cx) {
-    const { lanes, col } = this;
+  // @: links the card to the branch its board's repository is on, and to that branch's pull
+  // request when it has one.
+  linkBranch(card, cx) {
+    const { col } = this;
     const row = this.rows[col];
-    const card = lanes[col][row];
     const repo = this.repoFor(this.board);
-    if (card == null || !repo) return;
+    if (!repo) return;
     cx.spawn(async (cx) => {
-      const branch = (await exec("git", ["-C", repo, "rev-parse", "--abbrev-ref", "HEAD"])).stdout.trim();
-      const pr = await exec("gh", ["pr", "view", "--json", "number", "-q", ".number"], { cwd: repo }).catch(() => null);
-      let text = withLink(card, `@${branch}`);
-      if (pr?.code === 0 && pr.stdout.trim()) text = withLink(text, `#${pr.stdout.trim()}`);
+      const pr = await currentPullRequest(repo);
+      let text = withLink(card, `@${await currentBranch(repo)}`);
+      if (pr) text = withLink(text, `#${pr}`);
       this.apply(editCard(this.lanes, col, row, text), cx);
     });
   }
@@ -538,16 +529,7 @@ export default class Kanban extends View {
     if (!repo) return;
     const refs = new Map();
     for (const card of this.lanes.flat()) for (const r of cardLinks(card)?.refs ?? []) if (!refs.has(r.n) || r.kind) refs.set(r.n, r.kind);
-    const gh = async (args, parse) => {
-      const result = await exec("gh", args, { cwd: repo }).catch(() => null);
-      if (result?.code !== 0) return null;
-      try { return parse(JSON.parse(result.stdout)); } catch { return null; }
-    };
-    await Promise.all([...refs].map(async ([n, kind]) => {
-      const pr = kind === "issue" ? null : await gh(["pr", "view", String(n), "--json", "state,isDraft,reviewDecision,statusCheckRollup,headRefName,mergeable"], prStatus);
-      const status = pr ?? (kind === "pr" ? null : await gh(["issue", "view", String(n), "--json", "state,stateReason,url"], issueStatus));
-      if (status) this.statuses.set(`${repo}#${n}`, status);
-    }));
+    for (const [n, status] of await statusesOf(repo, [...refs])) this.statuses.set(`${repo}#${n}`, status);
     this.followStatuses(cx);
     cx.notify();
   }
@@ -566,9 +548,7 @@ export default class Kanban extends View {
       moves.push(`#${ref.n} → ${COLUMNS[to].toLowerCase()}`);
     }));
     if (!moves.length) return;
-    const history = (this.history[this.board] ??= { undo: [], redo: [] });
-    history.undo.push(this.lanes);
-    history.redo = [];
+    this.remember();
     this.lanes = lanes;
     this.clampRows();
     this.save(cx);
@@ -577,107 +557,87 @@ export default class Kanban extends View {
 
   // o: push the card's branch (or the current one) and open a pull request titled like the
   // card, closing its issue if it has one. Asks first, since both are seen by others.
-  askPullRequest(cx) {
-    const { col } = this;
-    const row = this.rows[col];
-    const card = this.lanes[col][row];
-    if (card == null) return;
+  askPullRequest(card, cx) {
     const links = this.linksOf(card);
     if (links?.pr) { notify({ title: `Already linked to #${links.pr.n}`, level: "info", timeout: 2500 }); return; }
     const repo = this.repoFor(this.board);
     if (!repo) return;
+    const { col } = this;
+    const row = this.rows[col];
     cx.spawn(async (cx) => {
-      const branch = this.branchOf(card) ?? (await exec("git", ["-C", repo, "rev-parse", "--abbrev-ref", "HEAD"])).stdout.trim();
+      const branch = this.branchOf(card) ?? (await currentBranch(repo));
       if (!branch || branch === "HEAD" || ["main", "master"].includes(branch)) {
         notify({ title: "No branch to open a pull request from", body: "Start work on the card, link it to a branch, or switch to one.", level: "warning" });
         return;
       }
-      this.confirmingPr = { col, row, branch, repo, title: withoutLinks(card), issue: links?.issue?.n ?? null };
-      cx.notify();
+      const title = withoutLinks(card);
+      const issue = links?.issue?.n ?? null;
+      this.askFor({
+        prompt: `Push ${branch} and open a pull request "${title}"?`, yes: "open",
+        run: (cx) => this.openPullRequest({ col, row, branch, repo, title, issue }, cx),
+      }, cx);
     });
   }
 
   openPullRequest({ col, row, branch, repo, title, issue }, cx) {
     cx.spawn(async (cx) => {
-      const lastLine = (text) => text.trim().split("\n").pop();
-      const push = await exec("git", ["-C", repo, "push", "-u", "origin", branch]);
-      if (push.code !== 0) { notify({ title: `Couldn't push ${branch}`, body: lastLine(push.stderr), level: "error" }); return; }
-      const body = issue ? `Closes #${issue}` : "";
-      const create = await exec("gh", ["pr", "create", "--head", branch, "--title", title, "--body", body], { cwd: repo });
-      const number = create.code === 0 && numberFromUrl(create.stdout);
-      if (!number) { notify({ title: "Couldn't open the pull request", body: lastLine(create.stderr), level: "error" }); return; }
-      notify({ title: `Opened pull request #${number}`, body: title, level: "success", timeout: 4000 });
+      const pushError = await push(repo, branch);
+      if (pushError !== null) { notify({ title: `Couldn't push ${branch}`, body: pushError, level: "error" }); return; }
+      const opened = await createPullRequest(repo, branch, title, issue ? `Closes #${issue}` : "");
+      if (opened.error !== undefined) { notify({ title: "Couldn't open the pull request", body: opened.error, level: "error" }); return; }
+      notify({ title: `Opened pull request #${opened.number}`, body: title, level: "success", timeout: 4000 });
       const card = this.lanes[col][row];
       if (card == null || withoutLinks(card) !== title) return; // the board moved on; the pull request still exists
-      this.apply(editCard(this.lanes, col, row, withLink(card, `#${number}`)), cx);
+      this.apply(editCard(this.lanes, col, row, withLink(card, `#${opened.number}`)), cx);
       await this.syncStatuses(cx);
     });
   }
 
   // Working on cards: start an agent on a card, and follow the agents working on them.
 
+  // The first installed agent, or a toast saying there is none.
+  async agentToStart() {
+    const picked = await pickAgent();
+    if (!picked) notify({ title: "No agent to start", body: "Install one Herdr knows, like Claude Code or Codex.", level: "warning" });
+    return picked;
+  }
+
+  // The folder checked out on branch, or a toast saying why there isn't one.
+  async checkoutOrSay(repo, branch) {
+    const { folder, error } = await checkout(repo, branch);
+    if (!folder) notify({ title: `Couldn't make a worktree for ${branch}`, body: error, level: "error" });
+    return folder ?? null;
+  }
+
   // s: a worktree on a branch named after the card, a space there with an agent that gets the
   // card (and its issue) as its task, the card linked to the branch and moved to work. Asks first.
   // Claude Code with pstack gets the card through poteto-mode, with the card's playbook.
-  askStartWork(cx) {
+  askStartWork(card, cx) {
+    const repo = this.repoFor(this.board);
+    if (!repo) { notify(NO_REPO); return; }
     const { col } = this;
     const row = this.rows[col];
-    const card = this.lanes[col][row];
-    const repo = this.repoFor(this.board);
-    if (card == null) return;
-    if (!repo) {
-      notify({ title: "No repository for this board", body: "Open the board from a terminal inside the project once.", level: "warning" });
-      return;
-    }
     const branch = this.branchOf(card) ?? branchFor(withoutLinks(card));
     const issue = this.linksOf(card)?.issue?.n ?? null;
     cx.spawn(async (cx) => {
-      const picked = await this.pickAgent();
+      const picked = await this.agentToStart();
       if (!picked) return;
-      this.confirmingStart = { col, row, card, branch, repo, issue, ...picked };
-      cx.notify();
+      const { agent, pstack } = picked;
+      const playbook = pstack ? ` with pstack ${playbookOf(withoutLinks(card)).playbook ?? "poteto-mode"}` : "";
+      this.askFor({
+        prompt: `Start ${agent.name ?? "an agent"}${playbook} on ${branch} in a new worktree?`, yes: "start",
+        run: (cx) => this.startWork({ col, row, card, branch, repo, issue, agent, pstack }, cx),
+      }, cx);
     });
   }
 
-  // The first installed agent Herdr knows, and whether it is Claude Code with pstack: { agent, pstack }.
-  async pickAgent() {
-    const agent = (await knownAgents().catch(() => [])).find((a) => a.installed);
-    if (!agent) {
-      notify({ title: "No agent to start", body: "Install one Herdr knows, like Claude Code or Codex.", level: "warning" });
-      return null;
-    }
-    const pstack = agent.key === "claude" && hasPstack(await readTextFile(`${home()}/.claude/plugins/installed_plugins.json`).catch(() => null));
-    return { agent, pstack };
-  }
-
-  // The folder checked out on branch: an existing checkout, else a new worktree on the branch,
-  // made from the default branch when the branch doesn't exist yet. Null when git fails.
-  async checkout(repo, branch) {
-    const git = (args) => exec("git", ["-C", repo, ...args]);
-    const folder = checkoutOf((await git(["worktree", "list", "--porcelain"])).stdout, branch);
-    if (folder) return folder;
-    const path = worktreePath(home(), repo, branch);
-    const hasBranch = (await git(["rev-parse", "--verify", "--quiet", `refs/heads/${branch}`])).code === 0;
-    if (!hasBranch) await git(["fetch", "--quiet", "origin", branch]); // a pull request opened elsewhere
-    const remote = (await git(["rev-parse", "--verify", "--quiet", `refs/remotes/origin/${branch}`])).code === 0;
-    const base = (await git(["symbolic-ref", "--short", "refs/remotes/origin/HEAD"])).stdout.trim() || "HEAD";
-    const made = await git(hasBranch ? ["worktree", "add", path, branch]
-      : remote ? ["worktree", "add", "-b", branch, path, `origin/${branch}`]
-      : ["worktree", "add", "-b", branch, path, base]);
-    if (made.code !== 0) {
-      notify({ title: `Couldn't make a worktree for ${branch}`, body: made.stderr.trim().split("\n").pop(), level: "error" });
-      return null;
-    }
-    return path;
-  }
-
-  startWork({ col, row, card, branch, repo, agent, issue, pstack }, cx) {
+  startWork({ col, row, card, branch, repo, issue, agent, pstack }, cx) {
     cx.spawn(async (cx) => {
-      const folder = await this.checkout(repo, branch);
+      const folder = await this.checkoutOrSay(repo, branch);
       if (!folder) return;
       const title = withoutLinks(card);
-      run("space.new", { name: playbookOf(title).title.slice(0, 40), folder, argv: agent.run, task: taskFor(title, issue, pstack) });
-      const { playbook } = playbookOf(title);
+      const { playbook, title: task } = playbookOf(title);
+      run("space.new", { name: task.slice(0, 40), folder, argv: agent.run, task: taskFor(title, issue, pstack) });
       if (playbook) await this.recordRun(branch, playbook);
       const work = COLUMNS.indexOf("Work");
       const linked = cardLinks(card)?.branch ? card : withLink(card, `@${branch}`);
@@ -694,12 +654,11 @@ export default class Kanban extends View {
   // ⇧B: an agent on the card's pull request, in its branch's checkout, with pstack's Babysit
   // playbook: driven to merge-ready when conflicts, changes requested or failing checks block
   // it, else one status pass. One babysitter per branch, so not while an agent is on it. Asks first.
-  askBabysit(cx) {
-    const card = this.lanes[this.col][this.rows[this.col]];
+  askBabysit(card, cx) {
     const repo = this.repoFor(this.board);
-    const pr = card != null ? this.linksOf(card)?.pr : null;
+    const pr = this.linksOf(card)?.pr;
     const sit = pr ? babysitFor(pr.n, pr.status) : null;
-    const branch = card != null ? this.branchOf(card) : null;
+    const branch = this.branchOf(card);
     if (!repo || !sit || !branch) {
       notify({ title: "Nothing to babysit", body: "The card needs an open pull request.", level: "warning", timeout: 3000 });
       return;
@@ -710,16 +669,21 @@ export default class Kanban extends View {
       return;
     }
     cx.spawn(async (cx) => {
-      const picked = await this.pickAgent();
+      const picked = await this.agentToStart();
       if (!picked) return;
-      this.confirmingBabysit = { card, branch, repo, sit, ...picked };
-      cx.notify();
+      const { agent, pstack } = picked;
+      const why = sit.blockers.length ? ` (${sit.blockers.join(", ")})` : "";
+      const how = sit.mode === "drive" ? `to merge-ready${why}` : "for one status check";
+      this.askFor({
+        prompt: `Babysit #${sit.number} ${how} with ${agent.name ?? "an agent"}${pstack ? " and pstack" : ""}?`, yes: "babysit",
+        run: (cx) => this.babysit({ card, branch, repo, sit, agent, pstack }, cx),
+      }, cx);
     });
   }
 
-  babysit({ card, branch, repo, agent, pstack, sit }, cx) {
+  babysit({ card, branch, repo, sit, agent, pstack }, cx) {
     cx.spawn(async () => {
-      const folder = await this.checkout(repo, branch);
+      const folder = await this.checkoutOrSay(repo, branch);
       if (!folder) return;
       run("space.new", { name: `Babysit #${sit.number}`, folder, argv: agent.run, task: babysitTask(sit, withoutLinks(card), pstack) });
       await this.recordRun(branch, "Babysit");
@@ -748,6 +712,13 @@ export default class Kanban extends View {
     return { run, book, planned: !run?.playbook };
   }
 
+  // Shows the selected card's run, and loads what it needs from its agent and branch.
+  inspect(cx) {
+    this.detail = null;
+    cx.spawn(async (cx) => { await this.loadDetail(); cx.notify(); });
+    cx.notify();
+  }
+
   // Opens the inspector on the first card whose text holds `query`, for a mod opened with props
   // { view: "inspect", card }.
   async inspectCard(query, cx) {
@@ -762,24 +733,15 @@ export default class Kanban extends View {
     cx.notify();
   }
 
-  // The inspected card's agent's last message (from its Claude Code transcript) and the commits
-  // on its branch.
+  // The inspected card's agent's last message and the commits on its branch.
   async loadDetail() {
-    const card = this.lanes[this.col][this.rows[this.col]];
+    const card = this.selected();
     const branch = card != null ? this.branchOf(card) : null;
     const repo = this.repoFor(this.board);
     if (!branch || !repo) { this.detail = null; return; }
-    const agent = this.agentOf(card);
-    let message = null;
-    if (agent?.cwd) {
-      // Claude Code keeps a folder's sessions in ~/.claude/projects/<folder, / and . as ->.
-      const dir = `${home()}/.claude/projects/${agent.cwd.replace(/[/.]/g, "-")}`;
-      const newest = (await exec("ls", ["-t", dir]).catch(() => null))?.stdout.split("\n").find((f) => f.endsWith(".jsonl"));
-      if (newest) message = lastMessage((await exec("tail", ["-n", "400", `${dir}/${newest}`]).catch(() => null))?.stdout);
-    }
-    const base = (await exec("git", ["-C", repo, "symbolic-ref", "--short", "refs/remotes/origin/HEAD"]).catch(() => null))?.stdout.trim() || "HEAD";
-    const count = await exec("git", ["-C", repo, "rev-list", "--count", `${base}..${branch}`]).catch(() => null);
-    this.detail = { branch, message, commits: count?.code === 0 ? Number(count.stdout.trim()) : null };
+    const cwd = this.agentOf(card)?.cwd;
+    const message = cwd ? await lastAgentMessage(cwd) : null;
+    this.detail = { branch, message, commits: await commitsAhead(repo, branch) };
   }
 
   // Agents by branch, read live: render runs again whenever Herdr's agents change.
@@ -794,7 +756,26 @@ export default class Kanban extends View {
     const now = agentsByBranch(agents(), panes());
     const done = finished(this.agentsBefore, now);
     this.agentsBefore = now;
+    this.nameTab(now);
     if (done.length) cx.spawn(async () => this.announceFinished(done, now));
+  }
+
+  // The tab's name says when agents on the board's cards need you, so it shows from any tab.
+  nameTab(agentsNow) {
+    const waiting = new Set(this.lanes.flat().map((card) => this.branchOf(card)).filter((b) => agentsNow.get(b)?.status === "blocked"));
+    const name = waiting.size ? `Board · ${waiting.size} needs you` : "Board";
+    if (name === this.tabName) return;
+    const tab = panes().find((p) => p.mod === "kanban-md")?.tab;
+    if (!tab) return;
+    this.tabName = name;
+    run("tab.rename", { id: tab, name });
+  }
+
+  // t: the card's agent, in whichever space and tab it is.
+  goToAgent(card) {
+    const agent = this.agentOf(card);
+    if (agent) run("agent.focus", { terminal: agent.address });
+    else notify({ title: "No agent on this card", body: "s starts one.", level: "info", timeout: 2500 });
   }
 
   async announceFinished(branches, now) {
@@ -826,16 +807,15 @@ export default class Kanban extends View {
       if (named != null) return { card: named, repo, pr: prOf(named) };
       // Another board's pull requests aren't followed: ask gh which one is on the branch.
       if (!cards.some(prOf)) continue;
-      const head = await exec("gh", ["pr", "list", "--head", branch, "--state", "all", "--json", "number", "-q", ".[0].number"], { cwd: repo }).catch(() => null);
-      const n = Number(head?.stdout.trim());
+      const n = await pullRequestFrom(repo, branch);
       const linked = n ? cards.find((c) => prOf(c) === n) : null;
       if (linked != null) return { card: linked, repo, pr: n };
     }
     return null;
   }
 
-  // f: a card whose pull request's checks fail sends the end of the failed job's log to the agent
-  // on its branch, to find the cause and fix it.
+  // f: a card whose pull request's checks fail sends the failing step of the failed job's log to
+  // the agent on its branch, to find the cause and fix it.
   fixCi(card, cx) {
     const pr = this.linksOf(card)?.pr;
     const repo = this.repoFor(this.board);
@@ -850,20 +830,10 @@ export default class Kanban extends View {
       return;
     }
     cx.spawn(async () => {
-      const gh = (args) => exec("gh", args, { cwd: repo }).catch(() => null);
-      const checks = await gh(["pr", "checks", String(pr.n), "--json", "name,bucket,link"]);
-      let failed = [];
-      try { failed = failedChecks(JSON.parse(checks?.stdout ?? "[]")); } catch { /* not JSON */ }
-      if (!failed.length) {
-        notify({ title: `Couldn't find #${pr.n}'s failed run`, body: "Its failing checks may not run on GitHub Actions.", level: "warning" });
-        return;
-      }
-      const log = await gh(["run", "view", failed[0].runId, "--log-failed"]);
-      if (log?.code !== 0) {
-        notify({ title: "Couldn't read the failed log", body: (log?.stderr ?? "").trim().split("\n").pop(), level: "error" });
-        return;
-      }
-      const sent = await hc(["send", agent.address, ciPrompt(pr.n, failed, log.stdout)]);
+      const { failed, log, error } = await failedRun(repo, pr.n);
+      if (error !== undefined) { notify({ title: "Couldn't read the failed log", body: error, level: "error" }); return; }
+      if (!failed.length) { notify({ title: `Couldn't find #${pr.n}'s failed run`, body: "Its failing checks may not run on GitHub Actions.", level: "warning" }); return; }
+      const sent = await hc(["send", agent.address, ciPrompt(pr.n, failed, log)]);
       if (sent.code === 0) notify({ title: `Sent #${pr.n}'s CI failure to ${agent.name}`, body: failed.map((c) => c.name).join(", "), level: "success", timeout: 3000 });
       else notify({ title: `Couldn't send to ${agent.name}`, body: (sent.stderr || sent.stdout).trim().split("\n").pop(), level: "error" });
     });
@@ -872,14 +842,9 @@ export default class Kanban extends View {
   // ⇧I: the repository's open issues into Ideas, once each. Asks first, saying how many.
   askImport(cx) {
     const repo = this.repoFor(this.board);
-    if (!repo) {
-      notify({ title: "No repository for this board", body: "Open the board from a terminal inside the project once.", level: "warning" });
-      return;
-    }
+    if (!repo) { notify(NO_REPO); return; }
     cx.spawn(async (cx) => {
-      const listed = await exec("gh", ["issue", "list", "--state", "open", "--limit", "200", "--json", "number,title"], { cwd: repo }).catch(() => null);
-      let issues = null;
-      try { issues = listed?.code === 0 ? JSON.parse(listed.stdout) : null; } catch { /* not JSON */ }
+      const issues = await openIssues(repo);
       if (!issues) {
         notify({ title: "Couldn't list the issues", body: "Is the GitHub CLI (gh) installed and signed in?", level: "error" });
         return;
@@ -889,16 +854,127 @@ export default class Kanban extends View {
         notify({ title: "No new issues", body: `All ${issues.length} open issues are on the board already.`, level: "info", timeout: 3000 });
         return;
       }
-      this.confirmingImport = { issues, added };
-      cx.notify();
+      this.askFor({ prompt: `Add ${plural(added.length, "open issue")} to Ideas?`, yes: "add", run: (cx) => this.importIssues(issues, cx) }, cx);
     });
   }
 
-  importIssues({ issues }, cx) {
+  importIssues(issues, cx) {
     const { lanes, added } = importIssues(this.lanes, issues); // against the board as it is now
     if (!added.length) return;
     this.apply({ lanes, col: 0, row: lanes[0].length - 1 }, cx);
-    notify({ title: `Added ${added.length} ${added.length === 1 ? "issue" : "issues"} to Ideas`, body: added.slice(0, 3).join(", ") + (added.length > 3 ? "…" : ""), level: "success", timeout: 3000 });
+    notify({ title: `Added ${plural(added.length, "issue")} to Ideas`, body: added.slice(0, 3).join(", ") + (added.length > 3 ? "…" : ""), level: "success", timeout: 3000 });
+  }
+
+  // Archive: shipped cards off the board, into ~/kanban/.archive/<board>.md under the day.
+
+  // ⇧A: asks first, saying how many.
+  askArchive(cx) {
+    const shipped = this.lanes[COLUMNS.length - 1].length;
+    if (!shipped) { notify({ title: "Nothing shipped to archive", level: "info", timeout: 2500 }); return; }
+    this.askFor({ prompt: `Archive ${plural(shipped, "shipped card")}?`, yes: "archive", run: (cx) => this.archiveShipped(cx) }, cx);
+  }
+
+  archiveShipped(cx) {
+    const ship = COLUMNS.length - 1;
+    const board = this.board;
+    const cards = this.lanes[ship];
+    cx.spawn(async (cx) => {
+      await exec("mkdir", ["-p", ARCHIVE]);
+      const before = await readTextFile(archiveOf(board)).catch(() => null);
+      const text = archiveCards(before, board, cards, localDay());
+      const written = await writeTextFile(archiveOf(board), text, before).then(() => true, () => false);
+      if (!written) { notify({ title: "Couldn't write the archive", body: "It changed meanwhile; try again.", level: "error" }); return; }
+      notify({ title: `Archived ${plural(cards.length, "card")}`, body: `~/kanban/.archive/${board}.md`, level: "success", timeout: 3000 });
+      if (board !== this.board) return; // the board changed meanwhile: its cards stay, archived
+      this.archived = parseArchive(text);
+      const lanes = this.lanes.map((lane, i) => (i === ship ? lane.filter((card) => !cards.includes(card)) : lane));
+      this.apply({ lanes, col: this.col, row: this.rows[this.col] }, cx);
+    });
+  }
+
+  async loadArchive(cx) {
+    const board = this.board;
+    const archived = parseArchive(await readTextFile(archiveOf(board)).catch(() => null));
+    if (board === this.board) this.archived = archived;
+    cx.notify();
+  }
+
+  showArchivePage(cx) {
+    this.view = "archive";
+    this.inspecting = null;
+    this.handle.focus();
+    cx.spawn((cx) => this.loadArchive(cx));
+    cx.notify();
+  }
+
+  // Go to (⌘K, /), like snappy-diff's: cards on this board, then on the others while typing,
+  // boards and actions. ↑↓ pick, enter goes, esc closes.
+
+  openPalette(cx) {
+    this.palette = true;
+    this.paletteIndex = 0;
+    this.paletteInput.set_value("");
+    this.paletteInput.focus();
+    cx.spawn(async (cx) => {
+      this.everything = await Promise.all(this.boards.map(async (board) => ({ board, lanes: parse(await readTextFile(fileOf(board)).catch(() => null)) })));
+      cx.notify();
+    });
+    cx.notify();
+  }
+
+  // The board's columns, on `board` with the cursor on `at` ({ col, row }) or its first card.
+  goToCard(board, at, cx) {
+    this.inspecting = null;
+    this.showBoard(cx);
+    this.openBoard(board, cx, at);
+  }
+
+  closePalette(cx) {
+    this.palette = false;
+    this.focusBoard();
+    cx.notify();
+  }
+
+  paletteResults() {
+    const query = this.paletteInput.value().trim();
+    const hit = (text) => !query || matches(text, query);
+    const cardsOf = (board, lanes) => lanes.flatMap((lane, col) => lane.map((card, row) => ({ board, card, col, row }))).filter(({ card }) => hit(card));
+    const toCard = ({ board, card, col, row }) => ({
+      label: withoutLinks(card), hint: board === this.board ? COLUMNS[col] : `${board} · ${COLUMNS[col]}`,
+      run: (cx) => this.goToCard(board, { col, row }, cx),
+    });
+    const here = cardsOf(this.board, this.lanes).map(toCard);
+    const elsewhere = !query ? [] : this.everything.filter((b) => b.board !== this.board).flatMap((b) => cardsOf(b.board, b.lanes)).slice(0, 40).map(toCard);
+    const boards = this.boards.filter((b) => b !== this.board && hit(b))
+      .map((b) => ({ label: b, hint: "board", run: (cx) => this.goToCard(b, null, cx) }));
+    const actions = [
+      ["New card", "n", (cx) => this.perform("new", cx)],
+      ["Notes", "⇧N", (cx) => this.showNotesPage(cx)],
+      ["Archive", "", (cx) => this.showArchivePage(cx)],
+      ["Archive shipped cards", "⇧A", (cx) => this.askArchive(cx)],
+      ["Import open issues", "⇧I", (cx) => this.askImport(cx)],
+      ["How it works", "?", (cx) => { this.inspecting = "help"; cx.notify(); }],
+      ["New board", "b", (cx) => this.perform("new-board", cx)],
+      ["Delete board", "⇧D", (cx) => this.perform("delete-board", cx)],
+    ].filter(([label]) => hit(label)).map(([label, hint, run]) => ({ label, hint: hint || "action", run }));
+    return [...here, ...elsewhere, ...boards, ...actions];
+  }
+
+  paletteKey(key, cx) {
+    const results = this.paletteResults();
+    if (key === "escape" || key === "cmd-k") this.closePalette(cx);
+    else if (key === "enter") this.pickResult(results[this.paletteIndex], cx);
+    else if (key === "down") this.paletteIndex = Math.min(results.length - 1, this.paletteIndex + 1);
+    else if (key === "up") this.paletteIndex = Math.max(0, this.paletteIndex - 1);
+    else return;
+    cx.stop_propagation();
+    cx.notify();
+  }
+
+  pickResult(result, cx) {
+    if (!result) return;
+    this.closePalette(cx);
+    result.run(cx);
   }
 
   // Notes: a free page per board, saved as you type.
@@ -939,18 +1015,6 @@ export default class Kanban extends View {
     });
   }
 
-  renderNotes(t) {
-    const font = settings().font_family;
-    return v_flex().flex_1().min_h(0).rounded(10).border_1().border_color(t.border).bg(t.background)
-      .child(h_flex().px(16).pt(12).pb(10).gap(8).items_center().border_b_1().border_color(t.border)
-        .child(div().size(8).rounded(4).bg(t.accent))
-        .child(div().flex_1().text_size(12.5).font_semibold().child(`${this.board} notes`))
-        .child(div().text_size(11).text_color(t.dim).child(this.notesPending ? "saving…" : `~/kanban/${this.board}.md`)))
-      .child(div().flex_1().min_h(0).p(16)
-        .child(Textarea.new(this.notesInput).size_full().text_size(13).text_color(t.foreground)
-          .when(Boolean(font), (el) => el.font_family(font))));
-  }
-
   // View
 
   render() {
@@ -963,9 +1027,11 @@ export default class Kanban extends View {
       .size_full().px(18).pt(16).pb(12).gap(14).bg(t.canvas).text_color(t.foreground).text_size(13)
       .when(Boolean(font), (el) => el.font_family(font))
       .child(this.renderTop(t))
-      .child(this.view === "notes" ? this.renderNotes(t) : this.inspecting ? this.renderInspector(t)
+      .child(this.view === "notes" ? this.renderNotes(t) : this.view === "archive" ? this.renderArchive(t)
+        : this.inspecting ? this.renderInspector(t)
         : h_flex().flex_1().min_h(0).gap(12).children(COLUMNS.map((name, c) => this.renderColumn(t, name, c))))
       .child(this.renderHint(t))
+      .when(this.palette, (el) => el.child(this.renderPalette(t)))
       // Measures the font's character width, which card wrapping is computed from.
       .child(div().id("probe").absolute().top(-100).left(0).opacity(0).whitespace_nowrap().text_size(TEXT_SIZE)
         .when(Boolean(font), (el) => el.font_family(font))
@@ -990,18 +1056,26 @@ export default class Kanban extends View {
     return Math.max(8, Math.floor((this.columnW - CARD_INSET - markWidth(agent)) / this.charW));
   }
 
+  // The room chips have in a card.
+  chipWidth() {
+    return Math.max(80, this.columnW - CARD_INSET);
+  }
+
+  chipsOf(t, card, done) {
+    return chipsOf(t, this.linksOf(card), this.runOf(card), this.charW, done);
+  }
+
   // Board tabs on the left, progress on the right.
   renderTop(t) {
     const editingName = this.editing?.kind === "board";
-    const tab = (board) => {
-      const active = board === this.board;
-      return h_flex().id(`board-${board}`).h(26).px(10).gap(6).items_center().rounded(6).cursor_pointer()
-        .text_color(active ? t.foreground : t.muted).when(active, (el) => el.bg(t.raised))
-        .hover((s) => s.text_color(t.foreground))
-        .on_click((_e, cx) => { this.openBoard(board, cx); this.handle.focus(); })
-        .child(board)
-        .when(board === this.project, (el) => el.child(div().size(5).rounded(3).bg(t.accent)));
-    };
+    const segment = (id, label, active, onClick) => h_flex().id(id).h(26).px(10).gap(6).items_center().rounded(6).cursor_pointer()
+      .text_color(active ? t.foreground : t.muted).when(active, (el) => el.bg(t.raised))
+      .hover((s) => s.text_color(t.foreground))
+      .on_click(onClick)
+      .child(label);
+    const group = () => h_flex().p(3).gap(2).items_center().rounded(8).border_1().border_color(t.border).bg(t.background);
+    const tab = (board) => segment(`board-${board}`, board, board === this.board, (_e, cx) => { this.openBoard(board, cx); this.handle.focus(); })
+      .when(board === this.project?.name, (el) => el.child(div().size(5).rounded(3).bg(t.accent)));
     const add = h_flex().id("board-new").h(26).w(26).justify_center().items_center().rounded(6).cursor_pointer()
       .text_color(t.dim).hover((s) => s.text_color(t.foreground).bg(t.hover))
       .on_click((_e, cx) => this.startEdit({ kind: "board" }, "", cx))
@@ -1009,19 +1083,14 @@ export default class Kanban extends View {
     const total = this.lanes.reduce((n, lane) => n + lane.length, 0);
     const shipped = this.lanes[COLUMNS.length - 1].length;
     return h_flex().items_center().gap(12)
-      .child(h_flex().p(3).gap(2).items_center().rounded(8).border_1().border_color(t.border).bg(t.background)
+      .child(group()
         .children(this.boards.map(tab))
         .child(editingName ? div().w(160).child(this.renderInput(t, "new-board")) : add))
-      .child(h_flex().p(3).gap(2).items_center().rounded(8).border_1().border_color(t.border).bg(t.background)
-        .children([["board", "Board"], ["notes", "Notes"]].map(([view, label]) => {
-          const active = this.view === view;
-          return h_flex().id(`view-${view}`).h(26).px(10).gap(6).items_center().rounded(6).cursor_pointer()
-            .text_color(active ? t.foreground : t.muted).when(active, (el) => el.bg(t.raised))
-            .hover((st) => st.text_color(t.foreground))
-            .on_click((_e, cx) => (view === "notes" ? this.showNotesPage(cx) : this.showBoard(cx)))
-            .child(label)
-            .when(view === "notes" && Boolean(this.notes.trim()), (el) => el.child(div().size(5).rounded(3).bg(t.dim)));
-        })))
+      .child(group()
+        .child(segment("view-board", "Board", this.view === "board", (_e, cx) => this.showBoard(cx)))
+        .child(segment("view-notes", "Notes", this.view === "notes", (_e, cx) => this.showNotesPage(cx))
+          .when(Boolean(this.notes.trim()), (el) => el.child(div().size(5).rounded(3).bg(t.dim))))
+        .child(segment("view-archive", "Archive", this.view === "archive", (_e, cx) => this.showArchivePage(cx))))
       .child(div().flex_1())
       .when(total > 0, (el) => el.child(h_flex().gap(10).items_center().text_size(11.5).text_color(t.dim)
         .child(`${shipped}/${total} shipped`)
@@ -1039,7 +1108,7 @@ export default class Kanban extends View {
       const editingThis = this.editing?.kind === "card" && this.editing.col === c && this.editing.row === item.r;
       if (item.input || editingThis) return INPUT_H + CARD_GAP;
       const lines = wrapText(withoutLinks(item.text), this.cardCols(this.agentOf(item.text))).length;
-      return cardHeight(lines, chipLayout(this.chips(theme(), item.text, false).map((chip) => chip.width), this.chipWidth()).length);
+      return cardHeight(lines, chipLayout(this.chipsOf(t, item.text, false).map((chip) => chip.width), this.chipWidth()).length);
     });
     return v_flex().id(`col-${c}`).flex_1().min_w(0).h_full().rounded(10).border_1()
       .border_color(active ? alpha(t.accent, "66") : t.border).bg(t.background)
@@ -1083,342 +1152,114 @@ export default class Kanban extends View {
       .hover((s) => s.border_color(selected ? t.accent : t.input))
       .child(v_flex().text_color(done ? t.muted : t.foreground).children(wrapText(withoutLinks(text), this.cardCols(agent)).map((line) =>
         h_flex().h(LINE_H).items_center().whitespace_nowrap().child(line))))
-      .when(Boolean(cardLinks(text)), (el) => el.child(this.renderChips(t, text, done)))
+      .when(Boolean(cardLinks(text)), (el) => el.child(chipRowsView(t, this.chipsOf(t, text, done), this.chipWidth())))
       // The agent's status sits at the end of the first line, where it can't be pushed out.
       .when(Boolean(agent), (el) => el.child(h_flex().absolute().top(PAD_Y + 1).right(10).h(LINE_H).items_center()
-        .child(this.agentMark(t, agent))));
-  }
-
-  // The room chips have in a card, and an 11px character's width.
-  chipWidth() {
-    return Math.max(80, this.columnW - CARD_INSET);
-  }
-
-  // A card's links as chips, each { width, parts }: a mark (a dot for a pull request, a ring for
-  // an issue) and pieces of text. Widths are worked out the way the text's are, so the card's
-  // height is known before it is drawn.
-  chips(t, card, done) {
-    const links = this.linksOf(card);
-    if (!links) return [];
-    const ch = (this.charW * 11) / 13;
-    const chip = (mark, texts) => ({
-      mark, texts,
-      width: 16 + (mark ? 12 : 0) + texts.reduce((n, [text]) => n + text.length * ch, 0) + 6 * Math.max(0, texts.length - 1),
-    });
-    const out = [];
-    for (const ref of links.refs) {
-      const st = ref.status;
-      if (st?.kind === "issue" || (ref.kind === "issue" && !st)) {
-        const color = !st ? t.dim : st.state === "open" ? t.ansi2 : st.completed ? t.ansi5 : t.dim;
-        out.push(chip({ ring: true, color }, [[`#${ref.n}`, done ? t.muted : t.foreground], ["issue", t.dim], ...(st ? [[st.state === "closed" && !st.completed ? "not planned" : st.state, t.dim]] : [])]));
-        continue;
-      }
-      const color = { open: t.ansi2, draft: t.dim, merged: t.ansi5, closed: t.ansi1 }[st?.state] ?? t.dim;
-      const checks = { passing: ["✓", t.ansi2], failing: ["✗", t.ansi1], pending: ["•", t.ansi3] }[st?.checks];
-      const review = { approved: ["approved", t.ansi2], changes: ["changes", t.ansi1] }[st?.review];
-      out.push(chip({ ring: false, color }, [[`#${ref.n}`, done ? t.muted : t.foreground], ...(st ? [[st.state, t.dim]] : []), ...(checks ? [checks] : []), ...(review ? [review] : [])]));
-    }
-    if (links.branch) out.push(chip(null, [[`⎇ ${links.branch}`, done ? t.dim : t.muted]]));
-    const { run, book } = this.runOf(card);
-    if (run && book) {
-      const at = progress(run, book.steps.length);
-      out.push(chip(null, [[`${at.done}/${book.steps.length}`, done ? t.muted : t.foreground], [at.current ? book.steps[at.current - 1][0] : "done", t.dim]]));
-    }
-    return out;
-  }
-
-  renderChips(t, card, done) {
-    const chips = this.chips(t, card, done);
-    const available = this.chipWidth();
-    const draw = ({ mark, texts }) => h_flex().h(CHIPS_H).max_w(available).px(7).gap(6).items_center().flex_none().rounded(5)
-      .bg(t.background).border_1().border_color(t.border).text_size(11)
-      .when(Boolean(mark), (el) => el.child(mark.ring
-        ? div().size(7).flex_none().rounded(4).border(1.5).border_color(mark.color)
-        : div().size(6).flex_none().rounded(3).bg(mark.color)))
-      .children(texts.map(([text, color]) => div().min_w(0).truncate().text_color(color).child(text)));
-    return v_flex().gap(CHIPS_ROW_GAP).children(chipLayout(chips.map((c) => c.width), available).map((row) =>
-      h_flex().h(CHIPS_H).gap(CHIP_GAP).items_center().children(row.map((i) => draw(chips[i])))));
-  }
-
-  // Herdr's own marks, as its agents sidebar draws them: a turning ring while working, "Needs you"
-  // when blocked, a filled dot when done, a hollow ring when idle.
-  agentMark(t, agent) {
-    if (agent.status === "working") return svg("mods/workspace-chrome/spinner.svg").size(12).flex_none().text_color(t.working).spin(900);
-    if (agent.status === "blocked") {
-      return div().flex_none().px(6).h(18).rounded(5).bg(alpha(t.blocked, "26")).text_size(10.5).font_semibold()
-        .text_color(t.blocked).flex().items_center().child("Needs you");
-    }
-    if (agent.status === "idle") return div().size(7).mx(2).flex_none().rounded(4).border(1.5).border_color(t.idle ?? t.dim);
-    return div().size(7).mx(2).flex_none().rounded(4).bg(t.done);
+        .child(agentMark(t, agent))));
   }
 
   renderInput(t, id) {
-    return div().id(id).h(36).px(12).flex().items_center().rounded(8).bg(t.background)
+    return div().id(id).h(INPUT_H).px(12).flex().items_center().rounded(8).bg(t.background)
       .border_1().border_color(t.accent)
       .child(Input.new(this.input).w_full().text_color(t.foreground));
+  }
+
+  renderNotes(t) {
+    const font = settings().font_family;
+    return v_flex().flex_1().min_h(0).rounded(10).border_1().border_color(t.border).bg(t.background)
+      .child(h_flex().px(16).pt(12).pb(10).gap(8).items_center().border_b_1().border_color(t.border)
+        .child(div().size(8).rounded(4).bg(t.accent))
+        .child(div().flex_1().text_size(12.5).font_semibold().child(`${this.board} notes`))
+        .child(div().text_size(11).text_color(t.dim).child(this.notesPending ? "saving…" : `~/kanban/${this.board}.md`)))
+      .child(div().flex_1().min_h(0).p(16)
+        .child(Textarea.new(this.notesInput).size_full().text_size(13).text_color(t.foreground)
+          .when(Boolean(font), (el) => el.font_family(font))));
+  }
+
+  // The board's archived cards, newest day first, read-only.
+  renderArchive(t) {
+    const day = (iso) => new Date(`${iso}T12:00:00`).toLocaleDateString(undefined, { weekday: "short", day: "numeric", month: "short", year: "numeric" });
+    return v_flex().flex_1().min_h(0).rounded(10).border_1().border_color(t.border).bg(t.background)
+      .child(h_flex().px(16).pt(12).pb(10).gap(8).items_center().border_b_1().border_color(t.border)
+        .child(div().size(8).rounded(4).bg(t.ansi2))
+        .child(div().flex_1().text_size(12.5).font_semibold().child(`${this.board} archive`))
+        .child(div().text_size(11).text_color(t.dim).child(`~/kanban/.archive/${this.board}.md`)))
+      .child(v_flex().id("archive").flex_1().min_h(0).overflow_y_scroll().px(16).py(14).gap(18)
+        .when(!this.archived.length, (el) => el.child(div().text_size(12).text_color(t.dim).child("Nothing archived yet. ⇧A on the board archives the shipped cards.")))
+        .children(this.archived.map(({ day: iso, cards }) => v_flex().gap(6)
+          .child(h_flex().gap(8).items_center().child(sectionLabel(t, day(iso))).child(div().text_size(10.5).text_color(t.dim).child(String(cards.length))))
+          .children(cards.map((card) => h_flex().gap(10).px(12).py(7).rounded(6).bg(t.raised).items_center()
+            .child(div().flex_1().min_w(0).truncate().text_color(t.muted).child(withoutLinks(card)))
+            .when(withoutLinks(card) !== card, (el) => el.child(div().flex_none().text_size(11).text_color(t.dim).child(card.slice(withoutLinks(card).length).trim()))))))));
+  }
+
+  // Go to, over the board: the typed query, then the results.
+  renderPalette(t) {
+    const results = this.paletteResults();
+    return div().absolute().inset_0().flex().justify_center().bg(alpha(t.background, "99"))
+      .on_mouse_down("left", (_e, cx) => this.closePalette(cx))
+      .child(v_flex().id("palette").mt(80).w(600).max_h(460).rounded(10).border_1().border_color(t.border).bg(t.popover).shadow_lg()
+        .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
+        .child(h_flex().h(44).px(12).gap(10).items_center().border_b_1().border_color(t.border)
+          .child(svg("mods/kanban-md/icons/search.svg").size(15).flex_none().text_color(t.dim))
+          .child(div().flex_1().child(Input.new(this.paletteInput).w_full().text_size(14))))
+        .child(v_flex().id("palette-results").max_h(400).overflow_y_scrollbar().p(6).gap(1)
+          .when(!results.length, (el) => el.child(div().p(12).text_size(12.5).text_color(t.dim).child("Nothing matches.")))
+          .children(results.slice(0, 120).map((r, i) => h_flex().id(`result-${i}`).h(32).px(10).gap(10).items_center().rounded(6).cursor_pointer()
+            .when(i === this.paletteIndex, (el) => el.bg(t.hover)).hover((s) => s.bg(t.hover))
+            .on_click((_e, cx) => this.pickResult(r, cx))
+            .child(div().flex_1().min_w(0).truncate().text_size(13).child(r.label))
+            .child(div().flex_none().text_size(11.5).text_color(t.dim).child(r.hint))))));
+  }
+
+  // In place of the columns: the selected card's run (i), or the loop and every playbook (?).
+  renderInspector(t) {
+    if (this.inspecting === "help") return helpView(t, this.helpIndex);
+    const card = this.selected();
+    if (card == null) return div().flex_1().text_color(t.muted).child("No card selected.");
+    const branch = this.branchOf(card);
+    return cardRunView(t, {
+      title: withoutLinks(card), col: this.col, ...this.runOf(card), agent: this.agentOf(card), branch,
+      pr: this.linksOf(card)?.pr, detail: this.detail?.branch === branch ? this.detail : null,
+    });
   }
 
   // Keys as keycaps. Asks and the selected card's state come first, in words.
   renderHint(t) {
     const line = h_flex().h(22).gap(14).items_center().text_size(11.5).text_color(t.dim);
-    if (this.view === "notes") return line.child(this.keys(t, [["esc", "back to the board"]])).child("saved as you type");
-    if (this.inspecting === "help") return line.child(this.keys(t, [["↑↓", "playbook"], ["esc", "back to the board"]]));
-    if (this.inspecting) return line.child(this.keys(t, [["←→↑↓", "other cards"], ["esc", "back to the board"]]));
-    if (this.confirmingDelete) {
-      return line.child(div().text_color(t.blocked).child(`Delete board "${this.board}"?`)).child(this.keys(t, [["y", "delete"], ["any key", "cancel"]]));
+    if (this.palette) return line.child(keycaps(t, [["↑↓", "pick"], ["↵", "go"], ["esc", "close"]]));
+    if (this.view === "notes") return line.child(keycaps(t, [["esc", "back to the board"]])).child("saved as you type");
+    if (this.view === "archive") return line.child(keycaps(t, [["esc", "back to the board"]]));
+    if (this.inspecting === "help") return line.child(keycaps(t, [["↑↓", "playbook"], ["esc", "back to the board"]]));
+    if (this.inspecting) return line.child(keycaps(t, [["←→↑↓", "other cards"], ["esc", "back to the board"]]));
+    if (this.ask) {
+      return line.child(div().text_color(this.ask.danger ? t.blocked : t.accent).child(this.ask.prompt))
+        .child(keycaps(t, [["y", this.ask.yes], ["any key", "cancel"]]));
     }
-    if (this.confirmingPr) {
-      const { branch, title } = this.confirmingPr;
-      return line.child(div().text_color(t.accent).child(`Push ${branch} and open a pull request "${title}"?`)).child(this.keys(t, [["y", "open"], ["any key", "cancel"]]));
-    }
-    if (this.confirmingStart) {
-      const { branch, agent, card, pstack } = this.confirmingStart;
-      const playbook = pstack ? ` with pstack ${playbookOf(withoutLinks(card)).playbook ?? "poteto-mode"}` : "";
-      return line.child(div().text_color(t.accent).child(`Start ${agent.name ?? "an agent"}${playbook} on ${branch} in a new worktree?`)).child(this.keys(t, [["y", "start"], ["any key", "cancel"]]));
-    }
-    if (this.confirmingImport) {
-      const n = this.confirmingImport.added.length;
-      return line.child(div().text_color(t.accent).child(`Add ${n} open ${n === 1 ? "issue" : "issues"} to Ideas?`)).child(this.keys(t, [["y", "add"], ["any key", "cancel"]]));
-    }
-    if (this.confirmingBabysit) {
-      const { agent, pstack, sit } = this.confirmingBabysit;
-      const why = sit.blockers.length ? ` (${sit.blockers.join(", ")})` : "";
-      const how = sit.mode === "drive" ? `to merge-ready${why}` : "for one status check";
-      return line.child(div().text_color(t.accent).child(`Babysit #${sit.number} ${how} with ${agent.name ?? "an agent"}${pstack ? " and pstack" : ""}?`)).child(this.keys(t, [["y", "babysit"], ["any key", "cancel"]]));
-    }
-    if (this.editing) return line.child(this.keys(t, [["↵", "save"], ["esc", "cancel"]]));
-    const card = this.lanes[this.col][this.rows[this.col]];
+    if (this.editing) return line.child(keycaps(t, [["↵", "save"], ["esc", "cancel"]]));
+    const card = this.selected();
     const links = card != null ? this.linksOf(card) : null;
     const ref = links?.pr ?? links?.issue;
     const status = ref?.status;
-    const repo = this.repoFor(this.board);
     const branch = card != null ? this.branchOf(card) : null;
-    const linked = card == null || !repo ? []
+    const agent = card != null ? this.agentOf(card) : null;
+    const linked = card == null || !this.repoFor(this.board) ? []
       : [
         ...(links?.pr || branch ? [["g", "open diff"]] : links?.issue ? [["g", "open issue"]] : []),
-        ...(links?.pr?.status?.checks === "failing" && this.agentOf(card) ? [["f", "fix CI"]] : []),
+        ...(links?.pr?.status?.checks === "failing" && agent ? [["f", "fix CI"]] : []),
         ["i", "inspect"],
-        ...(!this.agentOf(card) ? [["s", "start work"]] : []),
+        ...(agent ? [["t", "go to agent"]] : [["s", "start work"]]),
         ...(!branch ? [["@", "link branch"]] : []),
         ...(!links?.pr ? [["o", "open pull request"]] : []),
-        ...(links?.pr && babysitFor(links.pr.n, status) && !this.agentOf(card) ? [["⇧B", "babysit"]] : []),
+        ...(links?.pr && babysitFor(links.pr.n, status) && !agent ? [["⇧B", "babysit"]] : []),
       ];
-    const offer = this.project && !this.boards.includes(this.project) ? [["p", `board for ${this.project}`]] : [];
-    const agent = card != null ? this.agentOf(card) : null;
+    const offer = this.project && !this.boards.includes(this.project.name) ? [["p", `board for ${this.project.name}`]] : [];
+    const shipped = this.lanes[COLUMNS.length - 1].length ? [["⇧A", "archive shipped"]] : [];
     const doing = { working: "is working", blocked: "needs you", done: "is ready for review", idle: "is idle" };
     return line
       .when(Boolean(agent), (el) => el.child(h_flex().gap(6).items_center().text_color(t.muted)
-        .child(this.agentMark(t, agent)).child(`${agent.name ?? "Agent"} ${doing[agent.status] ?? agent.status}`)))
+        .child(agentMark(t, agent)).child(`${agent.name ?? "Agent"} ${doing[agent.status] ?? agent.status}`)))
       .when(Boolean(status), (el) => el.child(div().text_color(t.muted).child(describe(ref.n, status))))
-      .child(this.keys(t, [...offer, ...linked, ...HINTS]));
-  }
-
-  // The inspector: in place of the columns, the selected card's place on the loop and its
-  // playbook's steps as the agent reported them (i), or the loop and every playbook (?).
-  renderInspector(t) {
-    const panel = v_flex().id("inspector").flex_1().min_h(0).overflow_y_scroll().gap(22).px(28).py(24)
-      .rounded(10).border_1().border_color(t.border).bg(t.raised);
-    return this.inspecting === "help" ? this.renderHelp(t, panel) : this.renderCardRun(t, panel);
-  }
-
-  // A small uppercase heading over a section.
-  label(t, text) {
-    return div().text_size(10.5).font_medium().text_color(t.dim).child(text.toUpperCase());
-  }
-
-  renderHelp(t, panel) {
-    const book = PLAYBOOK_LIST[this.helpIndex ?? 0];
-    const who = [["You", t.ansi3, "you"], ["Board", t.ansi6, "board"], ["Agent", t.ansi5, "agent"]];
-    return panel
-      .child(v_flex().gap(6)
-        .child(div().text_size(18).font_semibold().child("How it works"))
-        .child(div().text_color(t.muted).whitespace_normal().child("A card goes around this loop. Herdr runs the board and the agents; pstack's playbooks tell the agent how to work.")))
-      .child(v_flex().gap(0)
-        .child(this.renderTrack(t, null))
-        .children(who.map(([name, color, key]) => h_flex().items_stretch().border_t(1).border_color(t.border)
-          .child(h_flex().w(TRACK_LABEL).flex_none().gap(8).items_center().py(10)
-            .child(div().size(7).rounded_full().bg(color)).child(div().text_size(12).font_medium().text_color(color).child(name)))
-          .children(LOOP.map((stop) => div().flex_1().min_w(0).px(10).py(10).text_size(11.5).line_height(17)
-            .text_color(stop[key] ? t.muted : t.dim).whitespace_normal().child(stop[key] ?? "·"))))))
-      .child(v_flex().gap(10)
-        .child(this.label(t, "Playbooks"))
-        .child(h_flex().items_stretch().rounded(8).border_1().border_color(t.border).bg(t.canvas)
-          .child(v_flex().w(230).flex_none().py(6).border_r(1).border_color(t.border).children(PLAYBOOK_LIST.map((b, i) => {
-            const on = b === book;
-            return v_flex().px(14).py(8).gap(2).border_l(2).border_color(on ? t.accent : t.canvas).when(on, (el) => el.bg(t.selected))
-              .child(div().font_medium().text_color(on ? t.foreground : t.muted).child(b.playbook))
-              .child(div().text_size(11).text_color(t.dim).child(b.words.length ? b.words.map((w) => `${w}:`).join("  ") : "⇧B on a pull request"));
-          })))
-          .child(v_flex().flex_1().min_w(0).gap(16).px(22).py(18)
-            .child(v_flex().gap(6)
-              .child(h_flex().gap(10).items_center().child(div().text_size(16).font_semibold().child(book.playbook))
-                .child(div().text_size(11.5).text_color(t.dim).child(`${book.steps.length} steps`)))
-              .child(this.renderEnds(t, book)))
-            .child(this.renderSteps(t, book, null)))));
-  }
-
-  renderCardRun(t, panel) {
-    const card = this.lanes[this.col][this.rows[this.col]];
-    if (card == null) return panel.child(div().text_color(t.muted).child("No card selected."));
-    const { run, book, planned } = this.runOf(card);
-    const agent = this.agentOf(card);
-    const links = this.linksOf(card);
-    const branch = this.branchOf(card);
-    const detail = this.detail?.branch === branch ? this.detail : null;
-    const station = stationOf(this.col, { working: Boolean(agent || run?.playbook), playbook: run?.playbook });
-    const at = book && run ? progress(run, book.steps.length) : null;
-    const since = (iso) => { const a = ago(iso); return a && (a === "just now" ? a : `${a} ago`); };
-    const pr = links?.pr;
-    const prColor = { open: t.ansi2, draft: t.dim, merged: t.ansi5, closed: t.ansi1 }[pr?.status?.state] ?? t.dim;
-    const facts = [
-      ["Station", LOOP[station].name],
-      ["Branch", branch ?? "none yet"],
-      ["Pull request", pr ? (pr.status ? describe(pr.n, pr.status) : `#${pr.n}`) : "none yet"],
-      ...(detail?.commits != null ? [["Commits", `${detail.commits} on the branch`]] : []),
-      ...(run?.at ? [["Updated", since(run.at)]] : []),
-    ];
-    return panel
-      .child(v_flex().gap(10)
-        .child(div().text_size(18).font_semibold().whitespace_normal().child(withoutLinks(card)))
-        .child(h_flex().flex_wrap().gap(18).items_center().text_size(12).text_color(t.muted)
-          .when(Boolean(book), (el) => el.child(h_flex().gap(6).items_center().child(div().size(7).rounded_full().bg(t.ansi5)).child(`${book.playbook} playbook`)))
-          .when(Boolean(branch), (el) => el.child(`⎇ ${branch}`))
-          .when(Boolean(pr), (el) => el.child(h_flex().gap(6).items_center().child(div().size(7).rounded_full().bg(prColor))
-            .child(pr.status ? describe(pr.n, pr.status) : `#${pr.n}`)))))
-      .child(this.renderTrack(t, station))
-      .child(h_flex().gap(28).items_start()
-        .child(v_flex().flex_1().min_w(0).gap(16)
-          .child(v_flex().gap(8)
-            .child(h_flex().justify_between().items_center()
-              .child(this.label(t, book ? (planned ? "Playbook, planned" : "Playbook") : "Playbook"))
-              .when(Boolean(at), (el) => el.child(div().text_size(12).text_color(t.muted)
-                .child(at.current ? `${at.done} of ${book.steps.length} · ${book.steps[at.current - 1][0]}` : `all ${book.steps.length} done`))))
-            .child(book ? this.renderBar(t, book, run) : div()))
-          .child(book ? this.renderSteps(t, book, run) : this.renderNoPlaybook(t))
-          .when(Boolean(book), (el) => el.child(this.renderEnds(t, book)))
-          .when(Boolean(book && planned), (el) => el.child(div().text_size(11.5).text_color(t.dim).whitespace_normal()
-            .child(this.col <= 1 ? "Steps fill in once s starts an agent and it reports them." : "The agent hasn't reported a step yet."))))
-        .child(v_flex().w(360).flex_none().gap(22)
-          .child(v_flex().gap(8).child(this.label(t, "Agent")).child(this.renderAgent(t, agent, detail?.message)))
-          .child(v_flex().gap(8).child(this.label(t, "Details"))
-            .child(v_flex().children(facts.map(([k, v], i) => h_flex().gap(12).py(6)
-              .when(i > 0, (el) => el.border_t(1).border_color(t.border)).text_size(12)
-              .child(div().w(96).flex_none().text_color(t.dim).child(k))
-              .child(div().flex_1().min_w(0).truncate().text_color(t.muted).child(v))))))));
-  }
-
-  // The card's agent: its status, then its last message organised (summarize): the lead, a few
-  // points, how much more there is, and when it's blocked, its question.
-  renderAgent(t, agent, message) {
-    const box = v_flex().gap(10).p(14).rounded(8).border_1().border_color(t.border).bg(t.canvas);
-    if (!agent && !message) {
-      return box.child(div().text_size(12).text_color(t.dim).whitespace_normal()
-        .child(this.col <= 1 ? "No agent yet. s starts one." : "No agent on this branch now."));
-    }
-    const doing = { working: ["working", t.working], blocked: ["needs you", t.blocked], done: ["ready for review", t.done], idle: ["idle", t.dim] };
-    const [word, color] = doing[agent?.status] ?? ["not running", t.dim];
-    const when = message?.at ? ago(message.at) : null;
-    const sum = message ? summarize(message.text) : null;
-    return box
-      .child(h_flex().gap(8).items_center()
-        .when(Boolean(agent), (el) => el.child(this.agentMark(t, agent)))
-        .child(div().font_medium().child(agent?.name ?? "Agent"))
-        .child(div().text_size(12).text_color(color).child(word))
-        .child(div().flex_1())
-        .when(Boolean(when), (el) => el.child(div().text_size(11).text_color(t.dim).child(when === "just now" ? when : `${when} ago`))))
-      .when(!sum, (el) => el.child(div().text_size(12).text_color(t.dim).whitespace_normal()
-        .child("No message yet, or this agent keeps no Claude Code transcript.")))
-      .when(Boolean(sum && agent?.status === "blocked" && sum.question), (el) => el.child(v_flex().gap(4).px(10).py(8).rounded(6)
-        .bg(alpha(t.blocked, "1f")).border_1().border_color(alpha(t.blocked, "55"))
-        .child(div().text_size(10.5).font_medium().text_color(t.blocked).child("NEEDS YOU"))
-        .child(div().text_size(12).text_color(t.foreground).line_height(18).whitespace_normal().child(sum.question))))
-      .when(Boolean(sum?.lead), (el) => el.child(div().text_size(12.5).text_color(t.foreground).line_height(19).whitespace_normal().child(sum.lead)))
-      .when(Boolean(sum?.points.length), (el) => el.child(v_flex().gap(6).children(sum.points.map((point) =>
-        h_flex().gap(8).items_start().text_size(12)
-          .child(div().w(10).flex_none().text_color(t.dim).child("•"))
-          .child(div().flex_1().min_w(0).text_color(t.muted).line_height(17).whitespace_normal().child(point))))))
-      .when(Boolean(sum?.more), (el) => el.child(div().text_size(11).text_color(t.dim)
-        .child(`${sum.more} more in the agent's tab`)));
-  }
-
-  // The six stations as a track: numbered nodes joined by a line, the columns matching the
-  // you / board / agent rows under them. With `current`, earlier stations are passed (✓).
-  renderTrack(t, current) {
-    return h_flex().items_center().pb(12)
-      .child(div().w(current === null ? TRACK_LABEL : 0).flex_none())
-      .children(LOOP.map((stop, i) => {
-        const here = i === current;
-        const passed = current !== null && i < current;
-        const node = div().size(22).flex_none().rounded_full().flex().items_center().justify_center().text_size(11).font_semibold()
-          .border_1().border_color(here ? t.accent : passed ? t.ansi2 : t.border)
-          .bg(here ? t.accent : t.canvas).text_color(here ? t.accent_foreground ?? t.canvas : passed ? t.ansi2 : t.muted)
-          .child(passed ? "✓" : String(i + 1));
-        return h_flex().flex_1().min_w(0).items_center().gap(8).px(current === null ? 10 : 0)
-          .child(node)
-          .child(div().flex_none().font_medium().text_color(here ? t.foreground : passed ? t.muted : current === null ? t.foreground : t.dim).child(stop.name))
-          .child(i < LOOP.length - 1 ? div().flex_1().h(1).mx(6).bg(passed ? alpha(t.ansi2, "80") : t.border) : div().flex_1());
-      }));
-  }
-
-  // One segment a step: done green, skipped faint, the one in hand accent, to do a border line.
-  renderBar(t, book, run) {
-    const at = run ? progress(run, book.steps.length) : null;
-    return h_flex().gap(3).children(book.steps.map((_, i) => {
-      const s = run?.steps?.[i + 1]?.status;
-      const color = s === "done" ? t.ansi2 : s === "skipped" ? alpha(t.dim, "80") : at?.current === i + 1 ? t.accent : t.border;
-      return div().flex_1().h(5).rounded(3).bg(color);
-    }));
-  }
-
-  // A playbook's steps as a timeline: a node per step on a rail, its label and step, and the
-  // agent's note under it. ✓ done, – skipped, the one in hand ringed and tagged "now".
-  renderSteps(t, book, run) {
-    const at = run ? progress(run, book.steps.length) : null;
-    const last = book.steps.length - 1;
-    return v_flex().children(book.steps.map(([label, step], i) => {
-      const n = i + 1;
-      const status = run?.steps?.[n]?.status ?? (at?.current === n ? "now" : null);
-      const note = run?.steps?.[n]?.note;
-      const now = status === "now";
-      const node = status === "done"
-        ? div().size(16).rounded_full().bg(t.ansi2).flex().items_center().justify_center().text_size(10).text_color(t.canvas).child("✓")
-        : status === "skipped"
-          ? div().size(16).rounded_full().border_1().border_color(t.dim).flex().items_center().justify_center().text_size(10).text_color(t.dim).child("–")
-          : now
-            ? div().size(16).rounded_full().border(2).border_color(t.accent).flex().items_center().justify_center().child(div().size(6).rounded_full().bg(t.accent))
-            : div().size(16).rounded_full().border_1().border_color(t.border).flex().items_center().justify_center().text_size(9.5).text_color(t.dim).child(String(n));
-      const lineColor = status === "done" || status === "skipped" ? alpha(t.ansi2, "60") : t.border;
-      return h_flex().items_stretch().gap(12)
-        .child(v_flex().w(16).flex_none().items_center()
-          .child(div().mt(2).child(node))
-          .child(i < last ? div().w(1.5).flex_1().bg(lineColor) : div()))
-        .child(v_flex().flex_1().min_w(0).gap(3).pb(i < last ? 14 : 0)
-          .child(h_flex().gap(8).items_center()
-            .child(div().font_medium().text_color(now ? t.foreground : status === "done" ? t.foreground : status === "skipped" ? t.dim : t.muted).child(label))
-            .when(now, (el) => el.child(div().px(6).h(16).flex().items_center().rounded(4).bg(alpha(t.accent, "33")).text_size(10).text_color(t.accent).child("now"))))
-          .child(div().text_size(12).text_color(status === "skipped" ? t.dim : t.muted).whitespace_normal().child(step))
-          .when(Boolean(note), (el) => el.child(div().mt(2).pl(8).border_l(2).border_color(t.border).text_size(11.5).text_color(t.muted).whitespace_normal().child(note))));
-    }));
-  }
-
-  renderEnds(t, book) {
-    return h_flex().gap(8).items_start().text_size(12)
-      .child(div().flex_none().text_color(t.ansi2).child("Ends with"))
-      .child(div().flex_1().min_w(0).text_color(t.muted).whitespace_normal().child(book.ends));
-  }
-
-  renderNoPlaybook(t) {
-    return v_flex().gap(10).p(14).rounded(8).border_1().border_color(t.border).bg(t.canvas)
-      .child(div().text_color(t.muted).whitespace_normal().child("No playbook yet. Start the card with a word to pick one, or let poteto-mode pick and report it with `kanban playbook`."))
-      .child(h_flex().flex_wrap().gap(6).children(PLAYBOOK_LIST.filter((b) => b.words.length).map((b) =>
-        h_flex().gap(6).px(8).h(22).items_center().rounded(5).border_1().border_color(t.border).text_size(11.5)
-          .child(div().text_color(t.foreground).child(`${b.words[0]}:`)).child(div().text_color(t.dim).child(b.playbook)))));
-  }
-
-  keys(t, pairs) {
-    const cap = (key) => div().h(18).min_w(18).px(5).flex().items_center().justify_center().rounded(4)
-      .border_1().border_color(t.border).bg(t.background).text_size(10.5).text_color(t.muted).child(key);
-    return h_flex().gap(14).items_center().children(pairs.map(([key, label]) =>
-      h_flex().gap(5).items_center().child(cap(key)).child(label)));
+      .child(keycaps(t, [...offer, ...linked, ...shipped, ...HINTS]));
   }
 }

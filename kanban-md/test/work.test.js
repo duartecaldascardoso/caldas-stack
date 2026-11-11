@@ -121,3 +121,23 @@ test("chipRows wraps chips that don't fit", async () => {
   assert.equal(chipRows([80, 80, 80], 200), 2);
   assert.equal(chipRows([300], 200), 1); // a chip wider than the card still takes one row
 });
+
+test("chipsOf shows a card's links and playbook progress, with widths from the character width", async () => {
+  const { chipsOf } = await import("../mods/kanban-md/cards.js");
+  const t = { foreground: "fg", muted: "mu", dim: "di", ansi1: "red", ansi2: "green", ansi3: "yellow", ansi5: "purple" };
+  const links = {
+    refs: [
+      { n: 4, kind: null, status: { kind: "pr", state: "open", checks: "failing", review: "approved" } },
+      { n: 9, kind: "issue", status: { kind: "issue", state: "closed", completed: false } },
+    ],
+    branch: "fix/login",
+  };
+  const book = { steps: [["Reproduce", ""], ["Fix", ""], ["Verify", ""]] };
+  const run = { steps: { 1: { status: "done" }, 2: { status: "now" } } };
+  const chips = chipsOf(t, links, { run, book }, 13, false);
+  assert.deepEqual(chips.map((c) => c.texts.map(([text]) => text)), [["#4", "open", "✗", "approved"], ["#9", "issue", "not planned"], ["⎇ fix/login"], ["1/3", "Fix"]]);
+  assert.deepEqual(chips[0].mark, { ring: false, color: "green" });
+  assert.deepEqual(chips[1].mark, { ring: true, color: "di" });
+  assert.equal(chips[2].width, 16 + "⎇ fix/login".length * 11);
+  assert.deepEqual(chipsOf(t, null, { run: null, book: null }, 13, false), []);
+});
