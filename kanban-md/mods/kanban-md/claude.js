@@ -1,37 +1,31 @@
 // Claude Code's files for a project and for everywhere, read from disk into what setup.js
 // makes of them: { project, everywhere }, each { instructions, settings, skills, commands,
-// agents, hooks, servers }, everywhere with plugins too. Each item is { name, description, path }, with
-// `from` (a plugin's name) or `local` (why agents started from cards won't have it).
-import * as fs from "fs/promises";
-import { exec, home } from "herdr";
-import { entryOf, commandName, instructionsOf, settingsOf, hooksOf, serversOf, pluginsOf, localChanges } from "./setup.js";
+// agents, hooks, servers }, everywhere with plugins too. Each item is { name, description, path },
+// with `from` (a plugin's name) or `local` (why agents started from cards won't have it).
+//
+// Every file call a mod makes goes through the app, so files are found with one `find` and read
+// with one `head` rather than one call each.
+import { exec, home, readTextFile } from "herdr";
+import { entryOf, definitionsIn, splitHeads, instructionsOf, settingsOf, hooksOf, serversOf, pluginsOf, localChanges } from "./setup.js";
 
-const read = (path) => fs.readFile(path, "utf8").catch(() => null);
+const read = (path) => readTextFile(path).catch(() => null);
 const json = (text) => { try { return JSON.parse(text ?? ""); } catch { return null; } };
 
-// Every file under dir whose name passes `keep`, as paths relative to dir, a few levels deep.
-async function filesUnder(dir, keep, depth = 4) {
-  const entries = await fs.readdir(dir, { withFileTypes: true }).catch(() => []);
-  const out = [];
-  for (const entry of entries) {
-    if (entry.isDirectory() && depth > 0) out.push(...(await filesUnder(`${dir}/${entry.name}`, keep, depth - 1)).map((f) => `${entry.name}/${f}`));
-    else if (entry.isFile() && keep(entry.name)) out.push(entry.name);
-  }
-  return out.sort();
-}
-
-// Skills, commands and subagents kept under a .claude-like folder (or a plugin's root).
-async function definedIn(dir) {
-  const load = (kind, sub, keep, name) => filesUnder(`${dir}/${sub}`, keep).then((files) => Promise.all(files.map(async (f) => {
-    const entry = entryOf(`${dir}/${sub}/${f}`, await read(`${dir}/${sub}/${f}`), kind);
-    return name ? { ...entry, name: name(f) } : entry;
-  })));
-  const [skills, commands, agents] = await Promise.all([
-    load("skill", "skills", (n) => n === "SKILL.md"),
-    load("command", "commands", (n) => n.endsWith(".md"), commandName),
-    load("agent", "agents", (n) => n.endsWith(".md")),
-  ]);
-  return { skills, commands, agents };
+// Skills, commands and subagents kept under each of `roots` (.claude folders and plugins), as
+// [{ skills, commands, agents }] in the same order. The first 4 KB of a file hold its frontmatter.
+async function definedIn(roots) {
+  const dirs = roots.flatMap((root) => ["skills", "commands", "agents"].map((sub) => `${root}/${sub}`));
+  // find exits non-zero over folders that don't exist; what it found still counts.
+  const found = await exec("find", [...dirs, "-maxdepth", "5", "-type", "f", "-name", "*.md"]).catch(() => null);
+  const paths = (found?.stdout ?? "").split("\n").filter(Boolean).sort();
+  const byRoot = roots.map((root) => definitionsIn(root, paths));
+  const wanted = byRoot.flatMap((d) => [...d.skills, ...d.commands.map((c) => c.path), ...d.agents]);
+  const heads = wanted.length ? splitHeads((await exec("head", ["-c", "4096", ...wanted]).catch(() => null))?.stdout ?? "", wanted) : new Map();
+  return byRoot.map((d) => ({
+    skills: d.skills.map((path) => entryOf(path, heads.get(path), "skill")),
+    commands: d.commands.map(({ path, name }) => ({ ...entryOf(path, heads.get(path), "command"), name })),
+    agents: d.agents.map((path) => entryOf(path, heads.get(path), "agent")),
+  }));
 }
 
 async function instructions(paths) {
@@ -41,8 +35,8 @@ async function instructions(paths) {
 
 export async function projectSetup(root) {
   const claude = `${root}/.claude`;
-  const [defined, notes, shared, local, mcp, userConfig, status] = await Promise.all([
-    definedIn(claude),
+  const [[defined], notes, shared, local, mcp, userConfig, status] = await Promise.all([
+    definedIn([claude]),
     instructions([`${root}/CLAUDE.md`, `${root}/AGENTS.md`, `${claude}/CLAUDE.md`, `${root}/CLAUDE.local.md`]),
     read(`${claude}/settings.json`),
     read(`${claude}/settings.local.json`),
@@ -73,8 +67,7 @@ export async function projectSetup(root) {
 
 export async function everywhereSetup() {
   const claude = `${home()}/.claude`;
-  const [defined, notes, settings, installed, userConfig] = await Promise.all([
-    definedIn(claude),
+  const [notes, settings, installed, userConfig] = await Promise.all([
     instructions([`${claude}/CLAUDE.md`]),
     read(`${claude}/settings.json`),
     read(`${claude}/plugins/installed_plugins.json`),
@@ -82,20 +75,21 @@ export async function everywhereSetup() {
   ]);
   const plugins = pluginsOf(installed, settings);
   // An enabled plugin brings its skills, commands, subagents and hooks.
-  const brought = await Promise.all(plugins.filter((p) => p.enabled && p.root).map(async (p) => {
-    const [own, hooks] = await Promise.all([definedIn(p.root), read(`${p.root}/hooks/hooks.json`)]);
-    const from = (items) => items.map((item) => ({ ...item, from: p.name }));
-    return { skills: from(own.skills), commands: from(own.commands), agents: from(own.agents), hooks: from(hooksOf(hooks, `${p.root}/hooks/hooks.json`)) };
-  }));
-  const all = (kind) => [...defined[kind] ?? [], ...brought.flatMap((b) => b[kind])];
+  const enabled = plugins.filter((p) => p.enabled && p.root);
+  const [[defined, ...own], hookFiles] = await Promise.all([
+    definedIn([claude, ...enabled.map((p) => p.root)]),
+    Promise.all(enabled.map((p) => read(`${p.root}/hooks/hooks.json`))),
+  ]);
+  const from = (items, plugin) => items.map((item) => ({ ...item, from: plugin.name }));
+  const all = (kind) => [...defined[kind], ...enabled.flatMap((p, i) => from(own[i][kind], p))];
   return {
     instructions: notes,
     settings: [settingsOf(settings, `${claude}/settings.json`)].filter(Boolean),
     skills: all("skills"),
     commands: all("commands"),
     agents: all("agents"),
-    hooks: [...hooksOf(settings, `${claude}/settings.json`), ...brought.flatMap((b) => b.hooks)],
+    hooks: [...hooksOf(settings, `${claude}/settings.json`), ...enabled.flatMap((p, i) => from(hooksOf(hookFiles[i], `${p.root}/hooks/hooks.json`), p))],
     servers: serversOf(json(userConfig), `${home()}/.claude.json`),
-    plugins: plugins.map((p) => ({ name: p.name, description: `${p.version}${p.enabled ? "" : " · disabled"}`, path: p.root ? `${p.root}` : null })),
+    plugins: plugins.map((p) => ({ name: p.name, description: `${p.version}${p.enabled ? "" : " · disabled"}`, path: p.root })),
   };
 }

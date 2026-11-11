@@ -33,6 +33,38 @@ export function entryOf(path, text, kind) {
   return { name: meta.name || fallback, description: meta.description || firstLine(text), path };
 }
 
+// What defines skills, commands and subagents under `root` (a .claude folder or a plugin), from
+// a list of markdown paths: skills/**/SKILL.md, commands/**/*.md and agents/*.md.
+// { skills: [path], commands: [{ path, name }], agents: [path] }.
+export function definitionsIn(root, paths) {
+  const out = { skills: [], commands: [], agents: [] };
+  for (const path of paths) {
+    if (!path.startsWith(`${root}/`)) continue;
+    const [folder, ...rest] = path.slice(root.length + 1).split("/");
+    if (folder === "skills" && rest.at(-1) === "SKILL.md") out.skills.push(path);
+    else if (folder === "commands" && rest.length) out.commands.push({ path, name: commandName(rest.join("/")) });
+    else if (folder === "agents" && rest.length === 1) out.agents.push(path);
+  }
+  return out;
+}
+
+// `head -c N a b c`'s output, split back into each file's text: a Map of path -> text. head
+// marks each file with "==> path <==" when given more than one.
+export function splitHeads(output, paths) {
+  if (paths.length === 1) return new Map([[paths[0], output]]);
+  const texts = new Map();
+  let at = 0;
+  paths.forEach((path, i) => {
+    const marker = `==> ${path} <==\n`;
+    const start = output.indexOf(marker, at);
+    if (start < 0) return;
+    const next = i + 1 < paths.length ? output.indexOf(`\n==> ${paths[i + 1]} <==\n`, start) : -1;
+    texts.set(path, output.slice(start + marker.length, next < 0 ? undefined : next));
+    at = next < 0 ? output.length : next;
+  });
+  return texts;
+}
+
 // A command's name from its path under a commands folder: "review.md" is /review,
 // "git/commit.md" /git:commit.
 export function commandName(relative) {

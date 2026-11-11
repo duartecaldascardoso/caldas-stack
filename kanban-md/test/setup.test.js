@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { frontmatter, entryOf, commandName, instructionsOf, firstLine, settingsOf, hooksOf, serversOf, pluginsOf, localChanges, overlaps, setupSummary } from "../mods/kanban-md/setup.js";
+import { frontmatter, entryOf, commandName, instructionsOf, firstLine, settingsOf, hooksOf, serversOf, pluginsOf, localChanges, overlaps, setupSummary, definitionsIn, splitHeads } from "../mods/kanban-md/setup.js";
 
 test("frontmatter reads plain, quoted and block fields", () => {
   const text = "---\nname: shadcn\ndescription: >\n  Manages shadcn components\n  and projects.\nuser-invocable: false\ntitle: \"Quoted: yes\"\n---\n# Body";
@@ -58,6 +58,24 @@ test("pluginsOf reads installed plugins and whether they're enabled", () => {
 test("localChanges says which files a worktree won't have, and why", () => {
   const changes = localChanges("?? .claude/skills/new/SKILL.md\n!! .claude/settings.local.json\n M CLAUDE.md\nR  old.md -> .claude/agents/a.md\n");
   assert.deepEqual([...changes], [[".claude/skills/new/SKILL.md", "not committed"], [".claude/settings.local.json", "ignored"], ["CLAUDE.md", "changed"], [".claude/agents/a.md", "changed"]]);
+});
+
+test("definitionsIn sorts a folder's markdown into skills, commands and subagents", () => {
+  const found = definitionsIn("/p", [
+    "/p/skills/deploy/SKILL.md", "/p/skills/deploy/reference.md", "/p/skills/synced/x/y/SKILL.md",
+    "/p/commands/review.md", "/p/commands/git/commit.md", "/p/agents/reviewer.md", "/p/agents/notes/extra.md", "/other/skills/a/SKILL.md",
+  ]);
+  assert.deepEqual(found, {
+    skills: ["/p/skills/deploy/SKILL.md", "/p/skills/synced/x/y/SKILL.md"],
+    commands: [{ path: "/p/commands/review.md", name: "/review" }, { path: "/p/commands/git/commit.md", name: "/git:commit" }],
+    agents: ["/p/agents/reviewer.md"],
+  });
+});
+
+test("splitHeads splits head's output back into each file", () => {
+  const out = "==> /a/SKILL.md <==\n---\nname: a\n---\n\n==> /b/SKILL.md <==\n# B\nbody";
+  assert.deepEqual([...splitHeads(out, ["/a/SKILL.md", "/b/SKILL.md"])], [["/a/SKILL.md", "---\nname: a\n---\n"], ["/b/SKILL.md", "# B\nbody"]]);
+  assert.deepEqual([...splitHeads("# Only", ["/c.md"])], [["/c.md", "# Only"]]);
 });
 
 test("setupSummary counts what a project adds, and what worktrees miss", () => {

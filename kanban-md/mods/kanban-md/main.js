@@ -251,7 +251,6 @@ export default class Kanban extends View {
     this.ask = null;
     this.archived = [];
     if (this.view === "archive") cx.spawn((cx) => this.loadArchive(cx));
-    this.setup = null;
     if (this.view === "setup") cx.spawn((cx) => this.loadSetup(cx));
     storeBoard(board);
     cx.spawn(async (cx) => { await this.refresh(cx); await this.syncStatuses(cx); });
@@ -735,7 +734,7 @@ export default class Kanban extends View {
   inspect(cx) {
     this.detail = null;
     cx.spawn(async (cx) => { await this.loadDetail(); cx.notify(); });
-    if (!this.setup) cx.spawn((cx) => this.loadSetup(cx));
+    if (this.setup?.root !== this.repoFor(this.board)) cx.spawn((cx) => this.loadSetup(cx));
     cx.notify();
   }
 
@@ -937,15 +936,25 @@ export default class Kanban extends View {
     cx.notify();
   }
 
+  // Each side shows as soon as it's read; until then, what was read last time, if anything.
+  // Everywhere is the same on every board, so it is kept between boards and visits.
   async loadSetup(cx) {
     const board = this.board;
     const root = this.repoFor(board);
-    const [project, everywhere, editor] = await Promise.all([root ? projectSetup(root) : null, everywhereSetup(), this.pickedEditor()]);
-    if (board !== this.board) return;
-    this.editor = editor;
-    this.setup = { root, project, everywhere };
-    this.setupIndex = Math.min(this.setupIndex, Math.max(0, setupItems(this.setup).length - 1));
+    const kept = this.setup?.root === root ? this.setup.project : undefined;
+    this.setup = { root, project: root ? kept : null, everywhere: this.everywhere };
     cx.notify();
+    const show = (side, value) => {
+      if (board !== this.board || !this.setup) return;
+      this.setup = { ...this.setup, [side]: value };
+      this.setupIndex = Math.min(this.setupIndex, Math.max(0, setupItems(this.setup).length - 1));
+      cx.notify();
+    };
+    await Promise.all([
+      this.pickedEditor().then((editor) => { this.editor = editor; }),
+      root && projectSetup(root).then((project) => show("project", project)),
+      everywhereSetup().then((everywhere) => { this.everywhere = everywhere; show("everywhere", everywhere); }),
+    ]);
   }
 
   // ↑↓ move through the rows, ←→ between the columns, enter or o opens the row's file.
@@ -1331,7 +1340,7 @@ export default class Kanban extends View {
     return cardRunView(t, {
       title: withoutLinks(card), col: this.col, ...this.runOf(card), agent: this.agentOf(card), branch,
       pr: this.linksOf(card)?.pr, detail: this.detail?.branch === branch ? this.detail : null,
-      setup: setupSummary(this.setup?.project),
+      setup: this.setup?.root === this.repoFor(this.board) ? setupSummary(this.setup.project) : null,
     });
   }
 

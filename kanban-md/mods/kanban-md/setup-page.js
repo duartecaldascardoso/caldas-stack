@@ -34,7 +34,8 @@ export function columnRows(items, side) {
   return rows;
 }
 
-// `setup`: { root, project, everywhere } (project null without a repository); `selected`: an
+// `setup`: { root, project, everywhere }: a side is undefined while it's read, and project is
+// null without a repository; `selected`: an
 // index into setupItems; `scrolls`: a VirtualListScrollHandle per column; `pick(index, cx)`
 // opens a row.
 export function setupPage(t, { setup, selected, scrolls, pick }) {
@@ -43,15 +44,15 @@ export function setupPage(t, { setup, selected, scrolls, pick }) {
   const column = (side, c, title, where) => {
     const rows = columnRows(items, side);
     const local = rows.some((r) => r.item?.local);
-    const empty = side === "project" && !setup?.project
-      ? "No repository for this board yet. Open the board from a terminal inside the project once."
+    const empty = setup?.[side] === undefined ? "Reading…"
+      : setup[side] === null ? "No repository for this board yet. Open the board from a terminal inside the project once."
       : `Nothing ${side === "project" ? "project-specific: no CLAUDE.md, AGENTS.md, .mcp.json or .claude folder" : "set up"}.`;
     return v_flex().flex_1().min_w(0).h_full().rounded(10).border_1().border_color(t.border).bg(t.background)
       .child(h_flex().px(16).pt(12).pb(10).gap(8).items_center().border_b_1().border_color(t.border)
         .child(div().size(8).rounded(4).bg(side === "project" ? t.accent : t.ansi5))
         .child(div().text_size(12.5).font_semibold().child(title))
         .child(div().flex_1().min_w(0).truncate().text_size(11).text_color(t.dim).child(where)))
-      .when(!rows.length, (el) => el.child(div().p(16).text_size(12).text_color(t.dim).whitespace_normal().child(setup ? empty : "Reading…")))
+      .when(!rows.length, (el) => el.child(div().p(16).text_size(12).text_color(t.dim).whitespace_normal().child(empty)))
       .when(rows.length > 0, (el) => el.child(div().flex_1().min_h(0).relative().px(8)
         .child(v_virtual_list(`setup-${side}`, rows.length, rows.map((r) => (r.section ? SECTION_H : ROW_H)),
           (i) => (rows[i].section ? `section-${i}` : `row-${rows[i].index}`),
