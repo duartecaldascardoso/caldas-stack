@@ -1,7 +1,7 @@
 // kanban-md: plain-text kanban boards for Herdr, one markdown file per board in ~/kanban.
 import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input, TextareaState, Textarea, Scrollbar, v_virtual_list, VirtualListScrollHandle } from "gpui-base";
-import { home, props, openOverlay, closeOverlay, readTextFile, writeTextFile, exec, hc, focused, notify, run, agents, panes, spaces, shared, setShared, nextCommand, settings, theme } from "herdr";
+import { home, appHome, props, openOverlay, closeOverlay, readTextFile, writeTextFile, exec, hc, focused, notify, run, agents, panes, spaces, shared, setShared, nextCommand, settings, theme } from "herdr";
 import {
   COLUMNS, emptyLanes, parse, serialize, notesOf, boardName, importIssues, matches, parseArchive, archiveCards, localDay,
   addCard, editCard, removeCard, shiftCard, reorderCard, cardLinks, withoutLinks, withLink,
@@ -15,6 +15,9 @@ import { statusesOf, currentPullRequest, pullRequestFrom, createPullRequest, ope
 import { pickAgent, lastAgentMessage } from "./agents.js";
 import { alpha, unzoom, keycaps, sectionLabel, agentMark, chipRowsView } from "./ui.js";
 import { helpView, cardRunView } from "./inspector.js";
+import { projectSetup, everywhereSetup } from "./claude.js";
+import { setupPage, setupItems, columnRows } from "./setup-page.js";
+import { setupSummary } from "./setup.js";
 
 const TEXT_SIZE = 13;
 // Card text sits inside: the column's border, the list's 8px sides, the card's border and 12px sides.
@@ -124,7 +127,11 @@ export default class Kanban extends View {
     this.columnW = 0; // measured
     this.charW = TEXT_SIZE * 0.6; // measured from the code font
     // Free notes, one page per board, kept at the end of its file under "## Notes".
-    this.view = props()?.view === "notes" ? "notes" : "board"; // or "archive"
+    this.view = props()?.view === "notes" ? "notes" : "board"; // or "archive", "setup"
+    // What agents work with here and everywhere: { root, project, everywhere }, read when shown.
+    this.setup = null;
+    this.setupIndex = 0;
+    this.setupScrolls = [VirtualListScrollHandle.new(), VirtualListScrollHandle.new()];
     this.archived = []; // the board's archive, [{ day, cards }], read when it's shown
     // Go to (⌘K): cards on every board, boards and actions, filtered as you type.
     this.palette = false;
@@ -244,6 +251,8 @@ export default class Kanban extends View {
     this.ask = null;
     this.archived = [];
     if (this.view === "archive") cx.spawn((cx) => this.loadArchive(cx));
+    this.setup = null;
+    if (this.view === "setup") cx.spawn((cx) => this.loadSetup(cx));
     storeBoard(board);
     cx.spawn(async (cx) => { await this.refresh(cx); await this.syncStatuses(cx); });
     cx.notify();
@@ -360,6 +369,7 @@ export default class Kanban extends View {
   onKey(event, cx) {
     if (this.palette) return this.paletteKey(event.keystroke, cx);
     if (event.keystroke === "cmd-k") { this.openPalette(cx); cx.stop_propagation(); return; }
+    if (this.view === "setup" && this.setupKey(event.keystroke, cx)) { cx.stop_propagation(); return; }
     if (this.view !== "board") {
       if (event.key === "escape") { this.showBoard(cx); cx.stop_propagation(); }
       return;
@@ -725,6 +735,7 @@ export default class Kanban extends View {
   inspect(cx) {
     this.detail = null;
     cx.spawn(async (cx) => { await this.loadDetail(); cx.notify(); });
+    if (!this.setup) cx.spawn((cx) => this.loadSetup(cx));
     cx.notify();
   }
 
@@ -916,6 +927,63 @@ export default class Kanban extends View {
     cx.notify();
   }
 
+  // Setup: what agents work with for the board's project and everywhere (setup-page.js).
+
+  showSetupPage(cx) {
+    this.view = "setup";
+    this.inspecting = null;
+    this.handle.focus();
+    cx.spawn((cx) => this.loadSetup(cx));
+    cx.notify();
+  }
+
+  async loadSetup(cx) {
+    const board = this.board;
+    const root = this.repoFor(board);
+    const [project, everywhere, editor] = await Promise.all([root ? projectSetup(root) : null, everywhereSetup(), this.pickedEditor()]);
+    if (board !== this.board) return;
+    this.editor = editor;
+    this.setup = { root, project, everywhere };
+    this.setupIndex = Math.min(this.setupIndex, Math.max(0, setupItems(this.setup).length - 1));
+    cx.notify();
+  }
+
+  // ↑↓ move through the rows, ←→ between the columns, enter or o opens the row's file.
+  setupKey(key, cx) {
+    const items = setupItems(this.setup);
+    const action = KEYS[key];
+    if (key === "enter" || key === "o") {
+      this.openSetupItem(this.setupIndex, cx);
+      return true;
+    }
+    if (!items.length || !["up", "down", "left", "right"].includes(action)) return false;
+    if (action === "up" || action === "down") {
+      this.setupIndex = Math.max(0, Math.min(items.length - 1, this.setupIndex + (action === "up" ? -1 : 1)));
+    } else {
+      const side = action === "left" ? "project" : "everywhere";
+      const first = items.findIndex((e) => e.side === side);
+      if (first >= 0 && items[this.setupIndex]?.side !== side) this.setupIndex = first;
+    }
+    const selected = items[this.setupIndex];
+    const c = selected.side === "project" ? 0 : 1;
+    this.setupScrolls[c].scroll_to_item(columnRows(items, selected.side).findIndex((r) => r.index === this.setupIndex), "center");
+    cx.notify();
+    return true;
+  }
+
+  // Opens the row's file in the editor picked in snappy-diff's settings, as snappy-diff does.
+  openSetupItem(index, cx) {
+    const path = setupItems(this.setup)[index]?.item.path;
+    this.setupIndex = index;
+    if (path) cx.open_url(`${this.editor ?? "zed"}://file${encodeURI(path)}`);
+    cx.notify();
+  }
+
+  // The editor picked in snappy-diff's settings: "zed" (its default), "vscode" or "cursor".
+  async pickedEditor() {
+    try { return JSON.parse(await readTextFile(`${appHome()}/data/snappy-diff/prefs.json`)).editor || "zed"; } catch { return "zed"; }
+  }
+
   // Go to (⌘K, /), like snappy-diff's: cards on this board, then on the others while typing,
   // boards and actions. ↑↓ pick, enter goes, esc closes.
 
@@ -964,6 +1032,7 @@ export default class Kanban extends View {
       ["New card", "n", "new"],
       ["Notes", "⇧N", "notes"],
       ["Archive", "", (cx) => this.showArchivePage(cx)],
+      ["Setup: instructions, skills, hooks, MCP", "", (cx) => this.showSetupPage(cx)],
       ["Archive shipped cards", "⇧A", "archive"],
       ["Import open issues", "⇧I", "import-issues"],
       ["Undo", "⌘Z", "undo"],
@@ -1067,6 +1136,7 @@ export default class Kanban extends View {
       .when(Boolean(font), (el) => el.font_family(font))
       .child(this.renderTop(t))
       .child(this.view === "notes" ? this.renderNotes(t) : this.view === "archive" ? this.renderArchive(t)
+        : this.view === "setup" ? setupPage(t, { setup: this.setup, selected: this.setupIndex, scrolls: this.setupScrolls, pick: (i, cx) => this.openSetupItem(i, cx) })
         : this.inspecting ? this.renderInspector(t)
         : h_flex().flex_1().min_h(0).gap(12).children(COLUMNS.map((name, c) => this.renderColumn(t, name, c))))
       .child(this.renderHint(t))
@@ -1129,7 +1199,8 @@ export default class Kanban extends View {
         .child(segment("view-board", "Board", this.view === "board", (_e, cx) => this.showBoard(cx)))
         .child(segment("view-notes", "Notes", this.view === "notes", (_e, cx) => this.showNotesPage(cx))
           .when(Boolean(this.notes.trim()), (el) => el.child(div().size(5).rounded(3).bg(t.dim))))
-        .child(segment("view-archive", "Archive", this.view === "archive", (_e, cx) => this.showArchivePage(cx))))
+        .child(segment("view-archive", "Archive", this.view === "archive", (_e, cx) => this.showArchivePage(cx)))
+        .child(segment("view-setup", "Setup", this.view === "setup", (_e, cx) => this.showSetupPage(cx))))
       .child(div().flex_1())
       .when(total > 0, (el) => el.child(h_flex().gap(10).items_center().text_size(11.5).text_color(t.dim)
         .child(`${shipped}/${total} shipped`)
@@ -1260,6 +1331,7 @@ export default class Kanban extends View {
     return cardRunView(t, {
       title: withoutLinks(card), col: this.col, ...this.runOf(card), agent: this.agentOf(card), branch,
       pr: this.linksOf(card)?.pr, detail: this.detail?.branch === branch ? this.detail : null,
+      setup: setupSummary(this.setup?.project),
     });
   }
 
@@ -1269,6 +1341,7 @@ export default class Kanban extends View {
     if (this.palette) return line.child(keycaps(t, [["↑↓", "pick"], ["↵", "go"], ["esc", "close"]]));
     if (this.view === "notes") return line.child(keycaps(t, [["esc", "back to the board"]])).child("saved as you type");
     if (this.view === "archive") return line.child(keycaps(t, [["esc", "back to the board"]]));
+    if (this.view === "setup") return line.child(keycaps(t, [["↑↓", "pick"], ["←→", "project or everywhere"], ["↵", "open in your editor"], ["esc", "back to the board"]]));
     if (this.inspecting === "help") return line.child(keycaps(t, [["↑↓", "playbook"], ["esc", "back to the board"]]));
     if (this.inspecting) return line.child(keycaps(t, [["←→↑↓", "other cards"], ["esc", "back to the board"]]));
     if (this.ask) {

@@ -52,10 +52,11 @@ export function helpView(t, index, keyGuide) {
           .child(div().min_w(0).truncate().text_color(t.muted).child(does))))))));
 }
 
-// A card's run. `card`: { title, col, run, book, planned, agent, branch, pr, detail }, the
-// card's column, its playbook run, its agent, its pull request link and what loadDetail found.
+// A card's run. `card`: { title, col, run, book, planned, agent, branch, pr, detail, setup }, the
+// card's column, its playbook run, its agent, its pull request link, what loadDetail found and
+// the project's setup in a few words (setupSummary).
 export function cardRunView(t, card) {
-  const { title, col, run, book, planned, agent, branch, pr, detail } = card;
+  const { title, col, run, book, planned, agent, branch, pr, detail, setup } = card;
   const station = stationOf(col, { working: Boolean(agent || run?.playbook), playbook: run?.playbook });
   const at = book && run ? progress(run, book.steps.length) : null;
   const since = (iso) => { const a = ago(iso); return a && (a === "just now" ? a : `${a} ago`); };
@@ -67,6 +68,7 @@ export function cardRunView(t, card) {
     ["Pull request", prText ?? "none yet"],
     ...(detail?.commits != null ? [["Commits", `${detail.commits} on the branch`]] : []),
     ...(run?.at ? [["Updated", since(run.at)]] : []),
+    ...(setup ? [["Setup", setup]] : []),
   ];
   return panel(t)
     .child(v_flex().gap(10)
