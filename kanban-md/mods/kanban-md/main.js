@@ -1,12 +1,12 @@
 // kanban-md: plain-text kanban boards for Herdr, one markdown file per board in ~/kanban.
 import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input, TextareaState, Textarea, Scrollbar, v_virtual_list, VirtualListScrollHandle } from "gpui-base";
-import { home, props, openOverlay, closeOverlay, readTextFile, writeTextFile, exec, focused, notify, run, agents, panes, knownAgents, settings, theme } from "herdr";
+import { home, props, openOverlay, closeOverlay, readTextFile, writeTextFile, exec, hc, focused, notify, run, agents, panes, knownAgents, settings, theme } from "herdr";
 import {
   COLUMNS, emptyLanes, parse, serialize, notesOf, boardName, importIssues,
   addCard, editCard, removeCard, shiftCard, reorderCard, cardLinks, withoutLinks, withLink,
 } from "./board.js";
-import { prStatus, issueStatus, columnFor, describe, numberFromUrl } from "./links.js";
+import { prStatus, issueStatus, columnFor, describe, numberFromUrl, failedChecks, ciPrompt } from "./links.js";
 import { branchFor, worktreePath, cardBranch, agentsByBranch, finished, checkoutOf, playbookOf, taskFor, hasPstack, babysitFor, babysitTask, playbookNamed, PLAYBOOK_LIST } from "./work.js";
 import { parseRuns, recordPlaybook, progress, LOOP, stationOf, lastMessage, ago, summarize } from "./runs.js";
 import { LINE_H, PAD_Y, CHIPS_H, CHIPS_GAP, CHIPS_ROW_GAP, CHIP_GAP, CARD_GAP, INPUT_H, wrapText, cardHeight, chipLayout } from "./cards.js";
@@ -40,7 +40,7 @@ const KEYS = {
   "cmd-z": "undo", "cmd-shift-z": "redo",
   "[": "prev-board", "shift-tab": "prev-board", "]": "next-board", "tab": "next-board",
   "b": "new-board", "p": "project-board", "shift-d": "delete-board", "escape": "close",
-  "g": "open-diff", "shift-2": "link", "@": "link", "o": "open-pr", "s": "start-work", "shift-b": "babysit", "i": "inspect", "?": "help", "shift-/": "help", "shift-n": "notes", "shift-i": "import-issues",
+  "g": "open-diff", "shift-2": "link", "@": "link", "o": "open-pr", "s": "start-work", "shift-b": "babysit", "i": "inspect", "?": "help", "shift-/": "help", "shift-n": "notes", "shift-i": "import-issues", "f": "fix-ci",
   "1": "column-1", "2": "column-2", "3": "column-3", "4": "column-4", "5": "column-5",
 };
 
@@ -395,6 +395,7 @@ export default class Kanban extends View {
       case "help": this.inspecting = "help"; return cx.notify();
       case "notes": return this.showNotesPage(cx);
       case "import-issues": return this.askImport(cx);
+      case "fix-ci": return this.fixCi(lanes[col][row], cx);
       case "close": return props()?.overlay && closeOverlay(props().overlay);
       default: {
         const column = action.match(/^column-(\d)$/);
@@ -763,6 +764,41 @@ export default class Kanban extends View {
     this.agentsBefore = now;
   }
 
+  // f: a card whose pull request's checks fail sends the end of the failed job's log to the agent
+  // on its branch, to find the cause and fix it.
+  fixCi(card, cx) {
+    const pr = this.linksOf(card)?.pr;
+    const repo = this.repoFor(this.board);
+    if (!pr || !repo) return;
+    if (pr.status?.checks !== "failing") {
+      notify({ title: `#${pr.n} has no failing checks`, level: "info", timeout: 2500 });
+      return;
+    }
+    const agent = this.agentOf(card);
+    if (!agent) {
+      notify({ title: "No agent on this card's branch", body: "s starts one; then f sends it the failure.", level: "warning" });
+      return;
+    }
+    cx.spawn(async () => {
+      const gh = (args) => exec("gh", args, { cwd: repo }).catch(() => null);
+      const checks = await gh(["pr", "checks", String(pr.n), "--json", "name,bucket,link"]);
+      let failed = [];
+      try { failed = failedChecks(JSON.parse(checks?.stdout ?? "[]")); } catch { /* not JSON */ }
+      if (!failed.length) {
+        notify({ title: `Couldn't find #${pr.n}'s failed run`, body: "Its failing checks may not run on GitHub Actions.", level: "warning" });
+        return;
+      }
+      const log = await gh(["run", "view", failed[0].runId, "--log-failed"]);
+      if (log?.code !== 0) {
+        notify({ title: "Couldn't read the failed log", body: (log?.stderr ?? "").trim().split("\n").pop(), level: "error" });
+        return;
+      }
+      const sent = await hc(["send", agent.address, ciPrompt(pr.n, failed, log.stdout)]);
+      if (sent.code === 0) notify({ title: `Sent #${pr.n}'s CI failure to ${agent.name}`, body: failed.map((c) => c.name).join(", "), level: "success", timeout: 3000 });
+      else notify({ title: `Couldn't send to ${agent.name}`, body: (sent.stderr || sent.stdout).trim().split("\n").pop(), level: "error" });
+    });
+  }
+
   // ⇧I: the repository's open issues into Ideas, once each. Asks first, saying how many.
   askImport(cx) {
     const repo = this.repoFor(this.board);
@@ -1089,6 +1125,7 @@ export default class Kanban extends View {
     const linked = card == null || !repo ? []
       : [
         ...(links?.pr || branch ? [["g", "open diff"]] : links?.issue ? [["g", "open issue"]] : []),
+        ...(links?.pr?.status?.checks === "failing" && this.agentOf(card) ? [["f", "fix CI"]] : []),
         ["i", "inspect"],
         ...(!this.agentOf(card) ? [["s", "start work"]] : []),
         ...(!branch ? [["@", "link branch"]] : []),

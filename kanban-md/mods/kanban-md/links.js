@@ -47,3 +47,43 @@ export function describe(number, status) {
 
 // The number at the end of the URL `gh pr create` prints.
 export const numberFromUrl = (url) => Number(url.trim().match(/\/pull\/(\d+)\s*$/)?.[1]) || null;
+
+// The failing checks of a pull request, from `gh pr check --json name,bucket,link`, with the
+// workflow run each belongs to (from its link): [{ name, runId }]. Checks outside Actions
+// have no run to read and are left out.
+export function failedChecks(checks) {
+  return checks
+    .filter((c) => c.bucket === "fail")
+    .map((c) => ({ name: c.name, runId: c.link?.match(/\/actions\/runs\/(\d+)/)?.[1] ?? null }))
+    .filter((c) => c.runId);
+}
+
+// The failing step of a failed run's log, as a message for the agent working on the branch.
+// `gh run view --log-failed` gives every step of a failed job, clean-up included: the step
+// that failed runs from its last "##[group]Run" marker to the "##[error]" line.
+const LOG_LINES = 120;
+const HEAD_LINES = 20;
+export function failingStep(log) {
+  const lines = log.trimEnd().split("\n")
+    // Each line is "job<TAB>step<TAB>timestamp message": keep the message.
+    .map((line) => (line.split("\t").length >= 3 ? line.split("\t").slice(2).join("\t") : line))
+    .map((line) => line.replace(/^\d{4}-\d\d-\d\dT[\d:.]+Z ?/, "").replace(/\u001b\[[0-9;]*m/g, "").replace(/\^\[\[[0-9;]*m/g, ""));
+  const error = lines.findLastIndex((line) => line.includes("##[error]"));
+  const end = error >= 0 ? error + 1 : lines.length;
+  const start = Math.max(0, lines.slice(0, end).findLastIndex((line) => line.startsWith("##[group]Run ")));
+  const step = lines.slice(start, end);
+  if (step.length <= LOG_LINES) return step.join("\n");
+  return [...step.slice(0, HEAD_LINES), `… ${step.length - LOG_LINES} lines …`, ...step.slice(-(LOG_LINES - HEAD_LINES))].join("\n");
+}
+
+export function ciPrompt(number, failed, log) {
+  const names = failed.map((c) => c.name).join(", ");
+  return [
+    `CI is failing on pull request #${number} (${names}).`,
+    "The failing step of the job's log:",
+    "```",
+    failingStep(log),
+    "```",
+    "Find the cause in this branch, fix it, and push.",
+  ].join("\n");
+}

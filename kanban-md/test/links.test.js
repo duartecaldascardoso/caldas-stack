@@ -45,3 +45,24 @@ test("issues: their state, and done once completed", () => {
   assert.equal(describe(34, open), "issue #34 open");
   assert.equal(describe(34, dropped), "issue #34 closed, not planned");
 });
+
+test("failed checks become a message for the agent", async () => {
+  const { failedChecks, ciPrompt } = await import("../mods/kanban-md/links.js");
+  const failed = failedChecks([
+    { name: "test", bucket: "fail", link: "https://github.com/o/r/actions/runs/123/job/9" },
+    { name: "lint", bucket: "pass", link: "https://github.com/o/r/actions/runs/123/job/8" },
+    { name: "vercel", bucket: "fail", link: "https://vercel.com/x" },
+  ]);
+  assert.deepEqual(failed, [{ name: "test", runId: "123" }]);
+  const t = (msg) => `test\tUNKNOWN STEP\t2026-11-11T10:00:00.1234567Z ${msg}`;
+  const log = [t("##[group]Run npm ci"), t("added 200 packages"), t("##[endgroup]"), t("##[group]Run npm test"),
+    t("\u001b[36;1mnpm test\u001b[0m"), t("not ok 2 - adds"), t("##[error]Process completed with exit code 1."),
+    t("Post job cleanup."), t("git config --unset-all")].join("\n");
+  const prompt = ciPrompt(47, failed, log);
+  assert.match(prompt, /^CI is failing on pull request #47 \(test\)\./);
+  assert.match(prompt, /```\n##\[group\]Run npm test\nnpm test\nnot ok 2 - adds\n##\[error\]Process completed with exit code 1\.\n```/);
+  assert.doesNotMatch(prompt, /cleanup|npm ci/);
+  const long = ["##[group]Run make", ...Array.from({ length: 300 }, (_, i) => `line ${i}`), "##[error]boom"].join("\n");
+  const lines = ciPrompt(1, failed, long).split("\n");
+  assert.ok(lines.includes("##[group]Run make") && lines.includes("##[error]boom") && lines.some((l) => /^… \d+ lines …$/.test(l)));
+});
