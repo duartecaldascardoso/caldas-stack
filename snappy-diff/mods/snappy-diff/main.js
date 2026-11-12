@@ -849,6 +849,10 @@ export default class SnappyDiff extends View {
       { label: `Open files in: ${EDITORS[this.prefs.editor]}`, pick: (cx) => this.setPref("editor", next(Object.keys(EDITORS), this.prefs.editor), cx) },
       { label: `Sidebar: ${this.prefs.sidebar ? "Shown" : "Hidden"}`, pick: (cx) => this.setPref("sidebar", !this.prefs.sidebar, cx) },
       { label: `Whole files: ${this.prefs.wholeFiles ? "On" : "Off"}`, pick: (cx) => this.setWholeFiles(!this.prefs.wholeFiles, cx) },
+      ...(this.files.length ? [
+        { label: this.files.every((f) => this.isCollapsed(f)) ? "Expand all files" : "Collapse all files", pick: (cx) => { this.menu = null; this.toggleAll(cx); } },
+        { label: "Overview", pick: (cx) => this.openOverview(cx) },
+      ] : []),
     ];
   }
 
@@ -1068,25 +1072,25 @@ export default class SnappyDiff extends View {
     const del = files.reduce((n, f) => n + f.del, 0);
     const viewed = files.filter((f) => isViewed(this.review, f)).length;
     const openComments = this.reviewItems().length;
-    const picker = (name, label, mono = true) => {
-      const trigger = h_flex().id(`pick-${name}`).h(28).px(10).gap(8).items_center().rounded(6).border_1().border_color(t.border)
-        .cursor_pointer().hover((st) => st.bg(t.hover)).flex_none()
-        .on_mouse_down("left", (e) => this.pressAt(e))
-        .on_click((_e, cx) => this.openMenu(name, cx))
-        .child(div().max_w(220).truncate().text_size(12.5).when(mono, (el) => el.font_family(settings().font_family)).child(label))
-        .child(div().text_color(t.dim).child(icon("chevron-down", 12)));
-      return trigger;
-    };
-    return h_flex().id("toolbar").h(TOOLBAR_H).flex_none().px(10).gap(6).items_center().border_b_1().border_color(t.border).bg(t.background)
+    // Borderless: the range reads as text, and only shows it's a button under the pointer.
+    const picker = (name, label, mono = true) => h_flex().id(`pick-${name}`).h(28).px(6).gap(4).items_center().rounded(6)
+      .cursor_pointer().hover((st) => st.bg(t.hover)).flex_none()
+      .on_mouse_down("left", (e) => this.pressAt(e))
+      .on_click((_e, cx) => this.openMenu(name, cx))
+      .when(this.menu === name, (el) => el.bg(t.hover))
+      .child(div().max_w(220).truncate().text_size(12.5).when(mono, (el) => el.font_family(settings().font_family)).child(label))
+      .child(div().text_color(t.dim).child(icon("chevron-down", 11)));
+    return h_flex().id("toolbar").h(TOOLBAR_H).flex_none().px(10).gap(4).items_center().border_b_1().border_color(t.border).bg(t.background)
       .child(this.button("sidebar", icon("panel"), (cx) => this.setPref("sidebar", !this.prefs.sidebar, cx)))
-      .child(div().mr(4).text_size(14).font_semibold().whitespace_nowrap().child("snappy diff"))
       .when(Boolean(s), (el) => el
         .child(picker("base", s.base === git.EMPTY_TREE ? "No commits yet" : s.base, s.base !== git.EMPTY_TREE))
-        .child(this.button("swap", icon("swap"), (cx) => s.head && this.reload({ base: s.head, head: s.base, commit: null }, cx)))
+        .child(h_flex().id("swap").h(28).w(20).justify_center().items_center().rounded(6).cursor_pointer().flex_none().text_color(t.dim)
+          .hover((st) => st.bg(t.hover).text_color(t.foreground))
+          .on_click((_e, cx) => s.head && this.reload({ base: s.head, head: s.base, commit: null }, cx))
+          .child(icon("swap", 12)))
         .child(picker("head", s.head || "Working tree", Boolean(s.head)))
-        .when(this.commits.length > 1, (el) => el.child(picker("commit", s.commit ? `${s.commit.slice(0, 7)} ${this.commits.find((c) => c.sha === s.commit)?.subject ?? ""}` : `All ${this.commits.length} commits`, false)))
-        .child(this.button("reload", icon("reload"), (cx) => this.reload({}, cx)))
-        .child(this.button("whitespace", icon("pilcrow"), (cx) => this.reload({ ignoreWhitespace: !s.ignoreWhitespace }, cx), { active: s.ignoreWhitespace }))
+        .when(this.commits.length > 1, (el) => el.child(div().mx(2).text_color(t.dim).child("·"))
+          .child(picker("commit", s.commit ? `${s.commit.slice(0, 7)} ${this.commits.find((c) => c.sha === s.commit)?.subject ?? ""}` : `All ${this.commits.length} commits`, false)))
         .when(Boolean(s.since), (el) => el.child(h_flex().id("since").h(28).px(10).gap(6).items_center().rounded(6).cursor_pointer()
           .bg(alpha(t.accent, "26")).text_size(12).text_color(t.foreground).hover((st) => st.bg(alpha(t.accent, "38")))
           .on_click((_e, cx) => this.reload({ since: null }, cx))
@@ -1104,12 +1108,11 @@ export default class SnappyDiff extends View {
           .child(div().font_medium().text_color(t.foreground).child(`#${this.pr.number}`))
           .child(div().max_w(260).truncate().child(this.pr.title)))))
       .child(div().flex_1())
-      .when(files.length > 0, (el) => el.child(h_flex().gap(10).mr(4).text_size(12).text_color(t.muted).whitespace_nowrap()
-        .child(`${viewed}/${files.length} viewed`)
+      .when(files.length > 0, (el) => el.child(h_flex().gap(8).mr(4).text_size(12).text_color(t.dim).whitespace_nowrap()
+        .child(`${viewed}/${files.length}`)
         .child(h_flex().id("kinds").gap(4).px(4).rounded(4).cursor_pointer().hover((st) => st.bg(t.hover))
           .on_mouse_down("left", (e) => this.pressAt(e)).on_click((_e, cx) => this.openMenu("kinds", cx))
-          .child(div().text_color(t.ansi2).child(`+${add.toLocaleString()}`)).child(div().text_color(t.ansi1).child(`−${del.toLocaleString()}`)))
-        .when(this.ms != null, (el) => el.child(`${this.ms} ms`))))
+          .child(div().text_color(t.ansi2).child(`+${add.toLocaleString()}`)).child(div().text_color(t.ansi1).child(`−${del.toLocaleString()}`)))))
       .when(this.threads.length > 0, (el) => el.child(h_flex().id("threads").h(28).px(10).gap(6).items_center().rounded(6).cursor_pointer()
         .text_size(12).text_color(t.foreground).bg(alpha(t.ansi4, "22")).hover((st) => st.bg(alpha(t.ansi4, "33")))
         .on_click((_e, cx) => this.nextThread(cx))
@@ -1128,9 +1131,7 @@ export default class SnappyDiff extends View {
       .when(this.unsentComments().length > 0, (el) => el.child(h_flex().id("github").h(28).px(10).gap(6).items_center().rounded(6).border_1().border_color(t.border)
         .cursor_pointer().text_size(12).hover((st) => st.bg(t.hover)).on_click((_e, cx) => this.sendToGitHub(cx))
         .child(icon("pull", 13)).child(this.posting ? "Sending…" : `GitHub (${this.unsentComments().length})`)))
-      .when(files.length > 0, (el) => el.child(this.button("overview", icon("chart"), (cx) => this.openOverview(cx), { active: this.overview })))
-      .child(this.button("collapse", icon(files.length && files.every((f) => this.isCollapsed(f)) ? "expand" : "collapse"), (cx) => this.toggleAll(cx)))
-      .child(this.button("style", icon(this.prefs.diffStyle === "split" ? "split" : "unified"), (cx) => this.setPref("diffStyle", this.prefs.diffStyle === "split" ? "unified" : "split", cx)))
+      .when(Boolean(s), (el) => el.child(this.button("goto", icon("search"), (cx) => this.openPalette("all", cx), { active: this.palette === "all" })))
       .child(this.button("settings", icon("settings"), (cx) => this.openMenu("settings", cx), { active: this.menu === "settings" }))
       .when(Boolean(s && props()?.overlay), (el) => el.child(this.button("pop-out", icon("pop-out"), () => this.openInTab())));
   }
@@ -1162,13 +1163,10 @@ export default class SnappyDiff extends View {
   renderSidebar(t, active) {
     const rows = this.tree();
     const shown = this.shown().length;
-    const keycap = (k) => div().h(18).min_w(18).px(4).flex().items_center().justify_center().rounded(4).border_1().border_color(t.border).text_size(10.5).text_color(t.muted).child(k);
     return v_flex().id("sidebar").w(SIDEBAR_W).flex_none().h_full().border_r_1().border_color(t.border)
-      .child(v_flex().p(8).gap(6)
-        .child(h_flex().id("goto").h(30).px(8).gap(8).items_center().rounded(6).cursor_pointer().text_color(t.muted).hover((s) => s.bg(t.hover))
-          .on_click((_e, cx) => this.openPalette("all", cx))
-          .child(icon("search", 13)).child(div().flex_1().child("Go to…")).child(h_flex().gap(3).child(keycap("⌘")).child(keycap("K"))))
-        .child(h_flex().h(32).px(8).gap(8).items_center().rounded(6).border_1().border_color(this.filtering ? t.accent : t.input)
+      .child(div().p(8)
+        .child(h_flex().h(30).px(8).gap(8).items_center().rounded(6).border_1().border_color(this.filtering ? t.accent : "#00000000")
+          .when(!this.filtering, (el) => el.bg(alpha(t.foreground, "08")))
           .child(div().text_color(t.dim).child(icon("search", 13)))
           .child(div().flex_1().min_w(0)
             .child(Input.new(this.filterInput).w_full().text_size(12)))
@@ -1194,8 +1192,7 @@ export default class SnappyDiff extends View {
     if (row.kind === "dir") {
       return base.text_color(t.foreground)
         .child(div().text_color(t.dim).child(icon(row.open ? "chevron-down" : "chevron-right", 12)))
-        .child(div().flex_1().min_w(0).truncate().child(row.name))
-        .child(div().size(5).rounded(3).bg(t.dim));
+        .child(div().flex_1().min_w(0).truncate().child(row.name));
     }
     const file = this.files.find((f) => f.id === row.id);
     const viewed = file && isViewed(this.review, file);
@@ -1480,7 +1477,7 @@ export default class SnappyDiff extends View {
         .child(h_flex().px(20).py(14).gap(12).items_center().border_b_1().border_color(t.border)
           .child(v_flex().flex_1().min_w(0).gap(2)
             .child(div().text_size(15).font_semibold().child("Overview"))
-            .child(div().text_size(12).text_color(t.dim).font_family(settings().font_family).truncate().child(subject)))
+            .child(div().text_size(12).text_color(t.dim).font_family(settings().font_family).truncate().child(this.ms != null ? `${subject} · ${this.ms} ms` : subject)))
           .when(viewed < files.length, (el) => el.child(h_flex().id("review-next").h(30).px(12).gap(6).items_center().rounded(6).bg(t.solid)
             .text_color(t.solid_foreground).text_size(12.5).cursor_pointer().on_click((_e, cx) => { leave(cx); this.reviewNext(cx); })
             .child("Review next file")))
