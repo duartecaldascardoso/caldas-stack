@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { frontmatter, entryOf, commandName, instructionsOf, firstLine, settingsOf, hooksOf, serversOf, pluginsOf, localChanges, overlaps, setupSummary, definitionsIn, splitHeads, editTarget, removeTarget, newDefinition } from "../mods/kanban-md/setup.js";
+import { frontmatter, entryOf, commandName, instructionsOf, firstLine, settingsOf, hooksOf, serversOf, pluginsOf, localChanges, overlaps, setupSummary, definitionsIn, splitHeads, changesOf, newDefinition, permissionsOf, envOf, setAt, deleteAt, withoutIndexLine } from "../mods/kanban-md/setup.js";
 
 test("frontmatter reads plain, quoted and block fields", () => {
   const text = "---\nname: shadcn\ndescription: >\n  Manages shadcn components\n  and projects.\nuser-invocable: false\ntitle: \"Quoted: yes\"\n---\n# Body";
@@ -22,7 +22,7 @@ test("instructionsOf and firstLine skip frontmatter, fences and heading marks", 
 
 test("settingsOf describes a settings file by what it sets", () => {
   assert.deepEqual(settingsOf('{"enabledMcpjsonServers":["shadcn"],"enableAllProjectMcpServers":true}', "/r/.claude/settings.local.json"),
-    { name: "settings.local.json", description: "enabledMcpjsonServers, enableAllProjectMcpServers", path: "/r/.claude/settings.local.json" });
+    { name: "settings.local.json", description: "enabledMcpjsonServers, enableAllProjectMcpServers: true", path: "/r/.claude/settings.local.json" });
   assert.equal(settingsOf(null, "/r/s.json"), null);
 });
 
@@ -64,11 +64,13 @@ test("definitionsIn sorts a folder's markdown into skills, commands and subagent
   const found = definitionsIn("/p", [
     "/p/skills/deploy/SKILL.md", "/p/skills/deploy/reference.md", "/p/skills/synced/x/y/SKILL.md",
     "/p/commands/review.md", "/p/commands/git/commit.md", "/p/agents/reviewer.md", "/p/agents/notes/extra.md", "/other/skills/a/SKILL.md",
+    "/p/output-styles/terse.md",
   ]);
   assert.deepEqual(found, {
     skills: ["/p/skills/deploy/SKILL.md", "/p/skills/synced/x/y/SKILL.md"],
     commands: [{ path: "/p/commands/review.md", name: "/review" }, { path: "/p/commands/git/commit.md", name: "/git:commit" }],
     agents: ["/p/agents/reviewer.md"],
+    styles: ["/p/output-styles/terse.md"],
   });
 });
 
@@ -99,18 +101,38 @@ test("hooks and servers carry what the reader shows, without secrets", () => {
   assert.ok(!server.detail.includes("secret") && !server.detail.includes("abc"));
 });
 
-test("editTarget and removeTarget keep plugins, ~/.claude.json and derived rows safe", () => {
+test("changesOf plans how each row is edited, deleted or turned on and off", () => {
   const skill = { kind: "skills", item: { path: "/r/.claude/skills/deploy/SKILL.md" } };
-  assert.equal(editTarget(skill), "/r/.claude/skills/deploy/SKILL.md");
-  assert.equal(removeTarget(skill), "/r/.claude/skills/deploy");
-  assert.equal(removeTarget({ kind: "commands", item: { path: "/r/.claude/commands/ship.md" } }), "/r/.claude/commands/ship.md");
-  const hook = { kind: "hooks", item: { path: "/r/.claude/settings.json" } };
-  assert.equal(editTarget(hook), "/r/.claude/settings.json");
-  assert.equal(removeTarget(hook), null);
-  assert.equal(editTarget({ kind: "skills", item: { path: "/c/p/skills/x/SKILL.md", from: "pstack" } }), null);
-  assert.equal(removeTarget({ kind: "skills", item: { path: "/c/p/skills/x/SKILL.md", from: "pstack" } }), null);
-  assert.equal(editTarget({ kind: "servers", item: { path: "/Users/me/.claude.json" } }), null);
-  assert.equal(editTarget({ kind: "plugins", item: { path: "/c/p" } }), null);
+  assert.deepEqual(changesOf(skill), { edit: { how: "file", path: "/r/.claude/skills/deploy/SKILL.md" }, remove: { how: "file", path: "/r/.claude/skills/deploy" }, toggle: null });
+  const hook = { kind: "hooks", item: { path: "/r/.claude/settings.json", at: ["hooks", "Stop", 0, "hooks", 0] } };
+  assert.deepEqual(changesOf(hook).remove, { how: "json", file: "/r/.claude/settings.json", at: ["hooks", "Stop", 0, "hooks", 0] });
+  assert.deepEqual(changesOf({ kind: "servers", item: { path: "/Users/me/.claude.json", mcp: { name: "linear", scope: "user" } } }).remove, { how: "mcp", name: "linear", scope: "user" });
+  assert.deepEqual(changesOf({ kind: "plugins", item: { plugin: { id: "pstack@cursor", scope: "user", on: true } } }).toggle, { how: "plugin", id: "pstack@cursor", scope: "user", on: true });
+  assert.deepEqual(changesOf({ kind: "memory", item: { path: "/m/a.md", index: "/m/MEMORY.md" } }).remove, { how: "file", path: "/m/a.md", index: "/m/MEMORY.md" });
+  assert.equal(changesOf({ kind: "settings", item: { path: "/r/.claude/settings.json" } }).remove, null);
+  assert.deepEqual(changesOf({ kind: "skills", item: { path: "/c/p/skills/x/SKILL.md", from: "pstack" } }), { edit: null, remove: null, toggle: null });
+  assert.equal(changesOf({ kind: "servers", item: { path: "/Users/me/.claude.json" } }).edit, null);
+});
+
+test("permissionsOf and envOf list rules and variables, never values", () => {
+  const settings = JSON.stringify({ permissions: { allow: ["Bash(npm run *)"], deny: ["Read(.env)"] }, env: { API_TOKEN: "secret" } });
+  assert.deepEqual(permissionsOf(settings, "s.json").map((p) => [p.name, p.description, p.at]), [["Bash(npm run *)", "allowed", ["permissions", "allow", 0]], ["Read(.env)", "denied", ["permissions", "deny", 0]]]);
+  const [token] = envOf(settings, "s.json");
+  assert.deepEqual([token.name, token.at], ["API_TOKEN", ["env", "API_TOKEN"]]);
+  assert.ok(!JSON.stringify(token).includes("secret"));
+});
+
+test("setAt and deleteAt change one entry, and deleteAt tidies what it leaves empty", () => {
+  const text = JSON.stringify({ hooks: { Stop: [{ hooks: [{ command: "a" }] }], PreToolUse: [{ matcher: "Bash", hooks: [{ command: "b" }, { command: "c" }] }] }, model: "opus" });
+  assert.deepEqual(JSON.parse(deleteAt(text, ["hooks", "Stop", 0, "hooks", 0])), { hooks: { PreToolUse: [{ matcher: "Bash", hooks: [{ command: "b" }, { command: "c" }] }] }, model: "opus" });
+  assert.deepEqual(JSON.parse(deleteAt(text, ["hooks", "PreToolUse", 0, "hooks", 0])).hooks.PreToolUse[0].hooks, [{ command: "c" }]);
+  assert.deepEqual(JSON.parse(deleteAt(JSON.stringify({ permissions: { allow: ["x"] } }), ["permissions", "allow", 0])), {});
+  assert.deepEqual(JSON.parse(setAt(text, ["hooks", "Stop", 0, "hooks", 0], { command: "z" })).hooks.Stop[0].hooks[0], { command: "z" });
+  assert.ok(setAt(text, ["model"], "sonnet").endsWith("\n"));
+});
+
+test("withoutIndexLine drops a memory's pointer from MEMORY.md", () => {
+  assert.equal(withoutIndexLine("- [A](a.md) — one\n- [B](b.md) — two\n", "a.md"), "- [B](b.md) — two\n");
 });
 
 test("newDefinition writes a skill, command or subagent from a template", () => {

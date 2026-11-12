@@ -8,17 +8,22 @@ import { div } from "gpui-kit";
 import { v_flex, h_flex, v_virtual_list, Scrollbar, InputState, Input, TextareaState, Textarea, VirtualListScrollHandle } from "gpui-base";
 import { exec, home, appHome, readTextFile, writeTextFile, notify, settings } from "herdr";
 import { alpha, sectionLabel } from "./ui.js";
-import { overlaps, setupSummary, editTarget, removeTarget, newDefinition, NEW_KINDS } from "./setup.js";
+import { overlaps, setupSummary, changesOf, newDefinition, NEW_KINDS, valueAt, setAt, deleteAt, withoutIndexLine } from "./setup.js";
 import { projectSetup, everywhereSetup } from "./claude.js";
 import { markdownBlocks } from "./markdown.js";
 
 const MAX_BLOCKS = 1500; // the reader stops there; the editor has the rest
 const TRASH = `${home()}/kanban/.trash`;
 
+// Each kind of row: its key in a setup, its section's name, and one of it in words.
 export const SECTIONS = [
-  ["instructions", "Instructions"], ["settings", "Settings"], ["skills", "Skills"], ["commands", "Commands"],
-  ["agents", "Subagents"], ["hooks", "Hooks"], ["servers", "MCP servers"], ["plugins", "Plugins"],
+  ["instructions", "Instructions", "instructions file"], ["memory", "Memory", "memory"], ["settings", "Settings", "settings file"],
+  ["permissions", "Permissions", "permission rule"], ["env", "Environment", "environment variable"],
+  ["skills", "Skills", "skill"], ["commands", "Commands", "command"], ["agents", "Subagents", "subagent"],
+  ["styles", "Output styles", "output style"], ["hooks", "Hooks", "hook"], ["servers", "MCP servers", "MCP server"], ["plugins", "Plugins", "plugin"],
 ];
+const one = (kind) => SECTIONS.find(([k]) => k === kind)[2];
+const CHANGED = "the file changed meanwhile; o opens it in your editor";
 const SECTION_H = 36;
 const ROW_H = 50;
 const SIDES = [["project", "This project"], ["everywhere", "Everywhere"]];
@@ -106,10 +111,12 @@ export class SetupPage {
     if (this.creating) return this.createKey(key, cx);
     const items = this.items();
     const entry = this.reading ? items[this.reading.index] : items[this.index];
+    const can = entry ? changesOf(entry) : {};
     const act = {
       o: () => this.openInEditor(entry, cx),
-      e: entry && editTarget(entry) ? () => cx.spawn((cx) => this.edit(cx)) : null,
-      d: entry && removeTarget(entry) ? () => this.askRemove(entry, cx) : null,
+      e: can.edit ? () => cx.spawn((cx) => this.edit(cx)) : null,
+      d: can.remove ? () => this.askRemove(entry, cx) : null,
+      t: can.toggle ? () => cx.spawn((cx) => this.toggle(entry, cx)) : null,
       n: () => this.startNew(cx),
     }[key];
     if (act) {
@@ -146,9 +153,11 @@ export class SetupPage {
     if (this.editing) return [["⌘S", "save"], ["esc", "stop editing"]];
     if (this.creating) return [["↵", "create"], ["tab", "kind"], ["⇧tab", "where"], ["esc", "cancel"]];
     const entry = this.items()[this.reading ? this.reading.index : this.index];
+    const plan = entry ? changesOf(entry) : {};
     const can = [
-      ...(entry && editTarget(entry) ? [["e", "edit"]] : []),
-      ...(entry && removeTarget(entry) ? [["d", "delete"]] : []),
+      ...(plan.edit ? [["e", "edit"]] : []),
+      ...(plan.remove ? [["d", removeWord(plan.remove)]] : []),
+      ...(plan.toggle ? [["t", plan.toggle.on ? "turn off" : "turn on"]] : []),
       ["o", "open in your editor"], ["n", "new"],
     ];
     return this.reading
@@ -170,14 +179,18 @@ export class SetupPage {
     if (entry.item.detail !== undefined) return;
     cx.spawn(async (cx) => {
       const root = entry.item.path;
-      const paths = entry.kind === "plugins" ? [`${root}/README.md`, `${root}/.claude-plugin/plugin.json`, `${root}/plugin.json`] : [root];
+      const isPlugin = entry.kind === "plugins";
+      const paths = isPlugin ? [`${root}/README.md`, `${root}/.claude-plugin/plugin.json`, `${root}/plugin.json`] : [root];
       let found = null;
       for (const path of paths) {
         const text = await readTextFile(path).catch(() => null);
         if (text !== null) { found = { path, text }; break; }
       }
+      // A plugin starts with what Claude Code says it adds and costs: its components and tokens.
+      const details = isPlugin ? await exec("claude", ["plugin", "details", entry.item.plugin.id]).catch(() => null) : null;
       if (this.reading?.index !== index) return;
-      this.reading = { index, text: !found ? "Nothing to read here." : found.path.endsWith(".json") ? fenced(found.text) : found.text };
+      const text = !found ? "Nothing to read here." : found.path.endsWith(".json") ? fenced(found.text) : found.text;
+      this.reading = { index, text: details?.code === 0 ? `${fenced(details.stdout.trim())}\n\n${text}` : text };
       cx.notify();
     });
   }
@@ -191,45 +204,91 @@ export class SetupPage {
   // and, for JSON, only when it parses.
 
   async edit(cx) {
-    const entry = this.items()[this.reading?.index ?? this.index];
-    const path = entry && editTarget(entry);
-    if (!path) return;
-    const original = await readTextFile(path).catch(() => null);
-    if (original === null) { notify({ title: "Couldn't read the file", body: path, level: "error" }); return; }
-    if (!this.reading) this.read(this.index, cx);
-    this.editing = { path, original, json: path.endsWith(".json") };
-    this.text.set_value(original);
+    const index = this.reading?.index ?? this.index;
+    const entry = this.items()[index];
+    const plan = entry && changesOf(entry).edit;
+    if (!plan) return;
+    const session = await this.editSession(plan, entry);
+    if (typeof session === "string") { notify({ title: `Can't edit ${entry.item.name}`, body: session, level: "error" }); return; }
+    if (!this.reading) this.read(index, cx);
+    this.editing = { ...session, index };
+    this.text.set_value(session.shown);
     this.text.focus();
     cx.notify();
+  }
+
+  // What editing shows and how saving writes it back: { name, path, shown, commit(text) }, commit
+  // resolving to null when saved, else why not. Or, as a string, why it can't be edited.
+  async editSession(plan, entry) {
+    if (plan.how === "file") {
+      const original = await readTextFile(plan.path).catch(() => null);
+      if (original === null) return "Couldn't read the file.";
+      return {
+        name: plan.path.split("/").pop(), path: plan.path, shown: original,
+        commit: async (text) => (plan.path.endsWith(".json") && parseError(text)) || writeTextFile(plan.path, text, original).then(() => null, () => CHANGED),
+      };
+    }
+    if (plan.how === "json") {
+      // One entry of a JSON file: a rule or a variable as its text, the rest as JSON.
+      const original = await readTextFile(plan.file).catch(() => null);
+      const value = valueAt(parsed(original), plan.at);
+      if (value === undefined) return "It's no longer in its file.";
+      const isText = typeof value === "string";
+      return {
+        name: entry.item.name, path: plan.file, shown: isText ? value : JSON.stringify(value, null, 2),
+        commit: async (text) => {
+          if (!isText && parseError(text)) return parseError(text);
+          const next = setAt(original, plan.at, isText ? text.trim() : JSON.parse(text));
+          return writeTextFile(plan.file, next, original).then(() => null, () => CHANGED);
+        },
+      };
+    }
+    if (plan.how === "mcp") {
+      // Claude Code rewrites ~/.claude.json itself, so the server is replaced through `claude mcp`,
+      // putting the old one back if the new one is refused.
+      const root = this.setup?.root;
+      const config = parsed(await readTextFile(`${home()}/.claude.json`).catch(() => null));
+      const value = (plan.scope === "local" ? config?.projects?.[root] : config)?.mcpServers?.[plan.name];
+      if (!value) return "Claude Code no longer has it.";
+      return {
+        name: plan.name, path: `${home()}/.claude.json`, shown: JSON.stringify(value, null, 2),
+        commit: async (text) => {
+          if (parseError(text)) return parseError(text);
+          const mcp = (args) => claude(["mcp", ...args, "-s", plan.scope], root);
+          const removed = await mcp(["remove", plan.name]);
+          if (removed) return removed;
+          const added = await mcp(["add-json", plan.name, JSON.stringify(JSON.parse(text))]);
+          if (added) await mcp(["add-json", plan.name, JSON.stringify(value)]);
+          return added;
+        },
+      };
+    }
+    return "This can't be edited here.";
   }
 
   editKey(key, cx) {
     if (key === "cmd-s") { cx.spawn((cx) => this.save(cx)); return true; }
     if (key !== "escape") return key === "cmd-k"; // typing goes to the text; go-to waits
-    if (this.text.value() === this.editing.original) {
+    if (this.text.value() === this.editing.shown) {
       this.stopEditing(cx);
       return true;
     }
     // The answer mustn't be typed into the text: the board takes the keyboard while it asks.
     this.board.focus();
     this.board.ask({
-      prompt: `Discard your changes to ${this.editing.path.split("/").pop()}?`, yes: "discard", danger: true,
+      prompt: `Discard your changes to ${this.editing.name}?`, yes: "discard", danger: true,
       run: (cx) => this.stopEditing(cx), cancel: () => this.text.focus(),
     }, cx);
     return true;
   }
 
   async save(cx) {
-    const { path, original, json } = this.editing;
-    const text = this.text.value();
-    if (json) {
-      try { JSON.parse(text); } catch (e) { notify({ title: "Not saved: the JSON doesn't parse", body: String(e.message ?? e), level: "error" }); return; }
-    }
-    const saved = await writeTextFile(path, text, original).then(() => true, () => false);
-    if (!saved) { notify({ title: "Not saved: the file changed meanwhile", body: "o opens it in your editor to see both.", level: "error" }); return; }
-    notify({ title: `Saved ${path.split("/").pop()}`, level: "success", timeout: 2000 });
+    const { name, commit, index } = this.editing;
+    const why = await commit(this.text.value());
+    if (why) { notify({ title: `Not saved: ${why}`, level: "error" }); return; }
+    notify({ title: `Saved ${name}`, level: "success", timeout: 2000 });
     this.stopEditing(cx);
-    await this.reloadAt(path, cx);
+    await this.reload({ index }, cx);
   }
 
   stopEditing(cx) {
@@ -238,11 +297,12 @@ export class SetupPage {
     cx.notify();
   }
 
-  // Reads the page again and reads the row whose file is `path`, if there still is one.
-  async reloadAt(path, cx) {
+  // Reads the page again, then reads a row: the one whose file is `path`, or the one at `index`.
+  async reload({ path, index }, cx) {
     await this.load(cx);
-    const index = this.items().findIndex((e) => e.item.path === path);
-    if (index >= 0) this.read(index, cx);
+    const items = this.items();
+    const at = path ? items.findIndex((e) => e.item.path === path) : Math.min(index, items.length - 1);
+    if (at >= 0) this.read(at, cx);
     else this.reading = null;
     cx.notify();
   }
@@ -280,29 +340,63 @@ export class SetupPage {
       await exec("mkdir", ["-p", made.path.slice(0, made.path.lastIndexOf("/"))]);
       const written = await writeTextFile(made.path, made.text, null).then(() => true, () => false);
       if (!written) { notify({ title: "It exists already", body: made.path, level: "warning" }); this.board.focus(); return; }
-      await this.reloadAt(made.path, cx);
+      await this.reload({ path: made.path }, cx);
       await this.edit(cx);
     });
   }
 
   // Delete: to ~/kanban/.trash, like a deleted board, after asking.
 
+  // Delete, remove or uninstall, after asking: files go to ~/kanban/.trash like a deleted board,
+  // an entry leaves its JSON file, servers and plugins go through Claude Code.
+
   askRemove(entry, cx) {
-    const what = SECTIONS.find(([k]) => k === entry.kind)[1].toLowerCase().replace(/s$/, "");
-    this.board.ask({
-      prompt: `Delete the ${what} "${entry.item.name}"? It moves to ~/kanban/.trash.`, yes: "delete", danger: true,
-      run: (cx) => cx.spawn((cx) => this.remove(entry, cx)),
-    }, cx);
+    const plan = changesOf(entry).remove;
+    const { name } = entry.item;
+    const prompt = {
+      file: `Delete the ${one(entry.kind)} "${name}"? It moves to ~/kanban/.trash.`,
+      json: `Remove the ${one(entry.kind)} "${name}" from ${plan.file?.split("/").pop()}?`,
+      mcp: `Remove the MCP server "${name}"${plan.scope === "local" ? " from this project" : " everywhere"}?`,
+      plugin: plan.scope === "user" ? `Uninstall ${name}? Every project loses it.` : `Remove ${name} from this project?`,
+    }[plan.how];
+    this.board.ask({ prompt, yes: removeWord(plan), danger: true, run: (cx) => cx.spawn((cx) => this.remove(entry, plan, cx)) }, cx);
   }
 
-  async remove(entry, cx) {
-    const target = removeTarget(entry);
-    await exec("mkdir", ["-p", TRASH]);
-    const moved = await exec("mv", [target, `${TRASH}/setup-${Date.now()}-${target.split("/").pop()}`]).catch(() => null);
-    if (moved?.code !== 0) { notify({ title: "Couldn't delete it", body: (moved?.stderr ?? "").trim(), level: "error" }); return; }
-    notify({ title: `Deleted ${entry.item.name}`, body: "It's in ~/kanban/.trash.", level: "success", timeout: 3000 });
+  async remove(entry, plan, cx) {
+    const why = await this.removed(plan);
+    if (why) { notify({ title: `Couldn't ${removeWord(plan)} ${entry.item.name}`, body: why, level: "error" }); return; }
+    notify({ title: `${DONE[removeWord(plan)]} ${entry.item.name}`, body: plan.how === "file" ? "It's in ~/kanban/.trash." : undefined, level: "success", timeout: 3000 });
     this.reading = null;
     await this.load(cx);
+  }
+
+  // Carries out a removal: null when done, else why not.
+  async removed(plan) {
+    if (plan.how === "file") {
+      await exec("mkdir", ["-p", TRASH]);
+      const moved = await exec("mv", [plan.path, `${TRASH}/setup-${Date.now()}-${plan.path.split("/").pop()}`]).catch(() => null);
+      if (moved?.code !== 0) return (moved?.stderr ?? "").trim() || "mv failed";
+      if (!plan.index) return null;
+      // A memory's line in MEMORY.md goes with it.
+      const index = await readTextFile(plan.index).catch(() => null);
+      return index === null ? null : writeTextFile(plan.index, withoutIndexLine(index, plan.path.split("/").pop()), index).then(() => null, () => null);
+    }
+    if (plan.how === "json") {
+      const original = await readTextFile(plan.file).catch(() => null);
+      if (original === null) return "Couldn't read its file.";
+      return writeTextFile(plan.file, deleteAt(original, plan.at), original).then(() => null, () => CHANGED);
+    }
+    if (plan.how === "mcp") return claude(["mcp", "remove", plan.name, "-s", plan.scope], this.setup?.root);
+    return claude(["plugin", "uninstall", plan.id, "-s", plan.scope], this.setup?.root);
+  }
+
+  // t on a plugin: off or on at its scope, through `claude plugin`.
+  async toggle(entry, cx) {
+    const { id, scope, on } = changesOf(entry).toggle;
+    const why = await claude(["plugin", on ? "disable" : "enable", id, "-s", scope], this.setup?.root);
+    if (why) { notify({ title: `Couldn't turn ${entry.item.name} ${on ? "off" : "on"}`, body: why, level: "error" }); return; }
+    notify({ title: `Turned ${entry.item.name} ${on ? "off" : "on"}`, body: "New Claude Code sessions pick it up.", level: "success", timeout: 3000 });
+    await this.reload({ index: this.index }, cx);
   }
 
   // Drawing
@@ -380,13 +474,15 @@ export class SetupPage {
       .on_click((_e, cx) => run(cx))
       .child(label).child(div().text_size(10.5).text_color(t.dim).child(key));
     const editing = this.editing;
+    const plan = changesOf(entry);
     const font = settings().font_family;
     const actions = editing
       ? [button("save", "Save", "⌘S", (cx) => cx.spawn((cx) => this.save(cx)), t.foreground), button("cancel", "Cancel", "esc", (cx) => this.editKey("escape", cx))]
       : [
-        ...(editTarget(entry) ? [button("edit", kind === "hooks" || kind === "servers" ? `Edit ${editTarget(entry).split("/").pop()}` : "Edit", "e", (cx) => cx.spawn((cx) => this.edit(cx)))] : []),
+        ...(plan.edit ? [button("edit", "Edit", "e", (cx) => cx.spawn((cx) => this.edit(cx)))] : []),
+        ...(plan.toggle ? [button("toggle", plan.toggle.on ? "Turn off" : "Turn on", "t", (cx) => cx.spawn((cx) => this.toggle(entry, cx)))] : []),
         ...(item.path ? [button("editor", "Open in editor", "o", (cx) => { this.openInEditor(entry, cx); this.board.focus(); })] : []),
-        ...(removeTarget(entry) ? [button("delete", "Delete", "d", (cx) => this.askRemove(entry, cx), t.blocked)] : []),
+        ...(plan.remove ? [button("remove", capitalized(removeWord(plan.remove)), "d", (cx) => this.askRemove(entry, cx), t.blocked)] : []),
       ];
     return v_flex().flex_1().min_h(0).rounded(10).border_1().border_color(editing ? t.accent : t.border).bg(t.background)
       .child(h_flex().px(20).pt(14).pb(12).gap(12).items_center().border_b_1().border_color(t.border)
@@ -416,6 +512,18 @@ async function pickedEditor() {
   try { return JSON.parse(await readTextFile(`${appHome()}/data/snappy-diff/prefs.json`)).editor || "zed"; } catch { return "zed"; }
 }
 
+// Runs Claude Code's command line in the project (a local scope is the folder's): null when it
+// worked, else the last line it printed.
+async function claude(args, cwd) {
+  const result = await exec("claude", args, { cwd: cwd ?? home() }).catch((e) => ({ code: 1, stderr: String(e.message ?? e) }));
+  return result.code === 0 ? null : ((result.stderr || result.stdout || "").trim().split("\n").pop() || `claude ${args.join(" ")} failed`);
+}
+
+const parsed = (text) => { try { return JSON.parse(text ?? ""); } catch { return null; } };
+const parseError = (text) => { try { JSON.parse(text); return null; } catch (e) { return `the JSON doesn't parse (${e.message})`; } };
+const removeWord = (plan) => (plan.how === "plugin" && plan.scope === "user" ? "uninstall" : plan.how === "file" ? "delete" : "remove");
+const capitalized = (word) => word[0].toUpperCase() + word.slice(1);
+const DONE = { delete: "Deleted", remove: "Removed", uninstall: "Uninstalled" };
 const clamp = (i, n) => Math.max(0, Math.min(n - 1, i));
 const cycle = (list, value) => list[(list.indexOf(value) + 1) % list.length];
 const fenced = (text) => `\`\`\`\n${text}\n\`\`\``;
