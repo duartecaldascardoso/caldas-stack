@@ -3,6 +3,7 @@ import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input, Scrollbar, v_virtual_list, VirtualListScrollHandle } from "gpui-base";
 import { props, closeOverlay, focused, notify, agents, panes, hc, appHome, exec, run, settings, theme } from "herdr";
 import * as fs from "fs/promises";
+import { show_fps_monitor, hide_fps_monitor, fps_monitor_visible } from "gpui-fps";
 import * as git from "./git.js";
 import { parsePatch, skippedFiles, firstChange } from "./patch.js";
 import { languageOf } from "./syntax.js";
@@ -78,10 +79,16 @@ export default class SnappyDiff extends View {
     this.items = [];
     this.sizes = [];
     this.fileStarts = [];
-    this.rowsCache = new Map();
+    this.rowsCache = new Map(); // file id -> { key, rows }: its rows, until the file, style or open separators change
+    this.bodies = new Map(); // file id -> { key, items, sizes }: those rows as list items, at a width
+    this.byId = new Map(); // file id -> file
+    this.treeCache = null; // { files, filter, closed, rows }
     this.topIndex = 0;
+    this.topKey = null; // the file at the top of the list as last drawn, and whether its header shows
+    this.topCheck = false; // a comparison of the top waiting for the frame to end
     this.mainW = 0;
     this.charW = CODE_SIZE * 0.6;
+    this.m = this.metrics(); // the layout's numbers, worked out once per rebuild
     this.press = null; // where the last press over the diff landed, for row clicks
     this.menu = null; // "base" | "head" | "commit" | "settings"
     this.menuIndex = 0;
@@ -260,7 +267,7 @@ export default class SnappyDiff extends View {
   }
 
   threadCols() {
-    return Math.max(20, Math.floor((this.metrics().width - 64) / this.charW));
+    return Math.max(20, Math.floor((this.m.width - 64) / this.charW));
   }
 
   // Whole files: every file's text, with every separator open. Files too big, binary, new or
@@ -349,9 +356,32 @@ export default class SnappyDiff extends View {
 
   rowsFor(file) {
     const open = this.expanded.get(file.id);
-    const key = `${file.id}|${file.rev}|${this.prefs.diffStyle}|${open ? [...open.gaps].join(",") : ""}`;
-    if (!this.rowsCache.has(key)) this.rowsCache.set(key, fileRows(file, this.prefs.diffStyle, languageOf(file.name), open));
-    return this.rowsCache.get(key);
+    const key = `${file.rev}|${this.prefs.diffStyle}|${open ? [...open.gaps].join(",") : ""}`;
+    const cached = this.rowsCache.get(file.id);
+    if (cached?.key === key) return cached.rows;
+    const rows = fileRows(file, this.prefs.diffStyle, languageOf(file.name), open);
+    this.rowsCache.set(file.id, { key, rows });
+    return rows;
+  }
+
+  // A file's rows as list items with their heights at `cols` characters a line: kept until the
+  // rows or the width change, so a rebuild only lays out what did.
+  bodyFor(file, cols) {
+    const rows = this.rowsFor(file);
+    const cached = this.bodies.get(file.id);
+    if (cached?.rows === rows && cached.cols === cols) return cached;
+    const items = [];
+    const sizes = [];
+    for (const row of rows) {
+      items.push({ ...row, f: file });
+      if (row.t === "hunk") sizes.push(HUNK_H);
+      else if (row.t === "notice") sizes.push(NOTICE_H);
+      else if (row.t === "split") sizes.push(Math.max(row.left ? wrapCount(row.left.text, cols) : 1, row.right ? wrapCount(row.right.text, cols) : 1) * LINE_H);
+      else sizes.push(wrapCount(row.cell.text, cols) * LINE_H);
+    }
+    const body = { rows, cols, items, sizes };
+    this.bodies.set(file.id, body);
+    return body;
   }
 
   // Opens a separator: loads the file's text once, then shows the lines it hid.
@@ -374,44 +404,59 @@ export default class SnappyDiff extends View {
     });
   }
 
+  // The list the diff view draws: each file's header, then its rows with comments, review
+  // threads and the open editor under the lines they're on. Files without any reuse their laid
+  // out rows as they are (bodyFor), which is most of a big diff.
   rebuild() {
     this.comments = withStatus(this.review.comments, this.files);
-    const m = this.metrics();
+    this.byId = new Map(this.files.map((f) => [f.id, f]));
+    const m = (this.m = this.metrics());
     const commentCols = Math.max(20, Math.floor((m.width - 120) / 7));
     const items = [];
     const sizes = [];
     const push = (item, size) => { items.push(item); sizes.push(size); };
+    const group = (list, fileOf, at) => {
+      const out = new Map();
+      for (const x of list) {
+        const byLine = out.get(fileOf(x)) ?? new Map();
+        byLine.set(at(x), [...(byLine.get(at(x)) ?? []), x]);
+        out.set(fileOf(x), byLine);
+      }
+      return out;
+    };
+    const notesOf = group(this.comments.filter((c) => !c.outdated), (c) => c.file, (c) => `${c.side}:${c.end}`);
+    const threadsOf = group(this.threads, (th) => th.path, (th) => `${th.side}:${th.end}`);
     this.fileStarts = [];
     this.headerIndex = new Map();
-    for (const f of this.only ? this.files.filter((file) => file.id === this.only) : this.files) {
+    const shown = this.only ? this.files.filter((file) => file.id === this.only) : this.files;
+    for (const f of shown) {
       this.fileStarts.push(items.length);
       this.headerIndex.set(f.id, items.length);
       push({ t: "file", f }, HEADER_H);
       if (this.isCollapsed(f)) continue;
-      const notes = new Map();
-      for (const c of this.comments) if (c.file === f.id && !c.outdated) notes.set(`${c.side}:${c.end}`, [...(notes.get(`${c.side}:${c.end}`) ?? []), c]);
-      const threads = new Map();
-      for (const th of this.threads) if (th.path === f.name) threads.set(`${th.side}:${th.end}`, [...(threads.get(`${th.side}:${th.end}`) ?? []), th]);
-      for (const row of this.rowsFor(f)) {
-        if (row.t === "hunk") { push({ ...row, f }, HUNK_H); continue; }
-        if (row.t === "notice") { push({ ...row, f }, NOTICE_H); continue; }
-        const lines = row.t === "split"
-          ? Math.max(row.left ? wrapCount(row.left.text, m.cols) : 1, row.right ? wrapCount(row.right.text, m.cols) : 1)
-          : wrapCount(row.cell.text, m.cols);
-        push({ ...row, f }, lines * LINE_H);
+      const body = this.bodyFor(f, m.cols);
+      const notes = notesOf.get(f.id);
+      const threads = threadsOf.get(f.name);
+      if (!notes && !threads && this.editing?.file !== f.id) {
+        for (let i = 0; i < body.items.length; i++) push(body.items[i], body.sizes[i]);
+        continue;
+      }
+      body.items.forEach((item, i) => {
+        push(item, body.sizes[i]);
+        if (item.t !== "split" && item.t !== "unified") return;
         // Comments and the open editor go under the last line they are on.
-        for (const [side, n] of this.rowSides(row)) {
-          for (const th of threads.get(`${side}:${n}`) ?? []) {
+        for (const [side, n] of this.rowSides(item)) {
+          for (const th of threads?.get(`${side}:${n}`) ?? []) {
             push({ t: "thread", th, f }, THREAD_CHROME + this.threadLines(th, this.threadCols()).length * COMMENT_LINE_H);
           }
-          for (const c of notes.get(`${side}:${n}`) ?? []) {
+          for (const c of notes?.get(`${side}:${n}`) ?? []) {
             if (c.id === this.editing?.id) continue;
             push({ t: "comment", c, f }, 52 + wrapCount(c.text, commentCols) * COMMENT_LINE_H);
           }
           const e = this.editing;
           if (e && e.file === f.id && e.side === side && e.end === n) push({ t: "editor", e, f }, EDITOR_H);
         }
-      }
+      });
     }
     this.items = items;
     this.sizes = sizes;
@@ -507,8 +552,14 @@ export default class SnappyDiff extends View {
     if (index >= 0) this.treeScroll.scroll_to_item(index, "center");
   }
 
+  // The sidebar's rows, kept until the files, the filter or the folded folders change.
   tree() {
-    return treeRows(this.shown(), this.closedDirs);
+    const closed = [...this.closedDirs].join("\n");
+    const c = this.treeCache;
+    if (c?.files === this.files && c.filter === this.filter && c.closed === closed) return c.rows;
+    const rows = treeRows(this.shown(), this.closedDirs);
+    this.treeCache = { files: this.files, filter: this.filter, closed, rows };
+    return rows;
   }
 
   // Review
@@ -936,6 +987,8 @@ export default class SnappyDiff extends View {
       ["Collapse or expand all files", "", (cx) => this.toggleAll(cx)],
       [`${s.ignoreWhitespace ? "Show" : "Ignore"} whitespace changes`, "", (cx) => this.reload({ ignoreWhitespace: !s.ignoreWhitespace }, cx)],
       ["Reload", "", (cx) => this.reload({}, cx)],
+      // Herdr's own frame-rate overlay, to see how the diff scrolls on this machine.
+      [fps_monitor_visible() ? "Hide frame rate" : "Show frame rate", "", () => (fps_monitor_visible() ? hide_fps_monitor() : show_fps_monitor())],
       ...(props()?.overlay ? [["Open in a tab", "t", () => this.openInTab()]] : []),
       ["Overview", "", (cx) => this.openOverview(cx)],
       [`${this.prefs.wholeFiles ? "Folded" : "Whole"} files`, "", (cx) => this.setWholeFiles(!this.prefs.wholeFiles, cx)],
@@ -991,7 +1044,7 @@ export default class SnappyDiff extends View {
     const item = this.items[Number(key)];
     const press = this.press;
     if (!item || !press) return;
-    const m = this.metrics();
+    const m = this.m;
     const fromRight = this.mainW - press.x;
     const f = item.f;
     if (item.t === "file") return this.pressHeader(f, this.headerPart(fromRight), cx);
@@ -1194,7 +1247,7 @@ export default class SnappyDiff extends View {
         .child(div().text_color(t.dim).child(icon(row.open ? "chevron-down" : "chevron-right", 12)))
         .child(div().flex_1().min_w(0).truncate().child(row.name));
     }
-    const file = this.files.find((f) => f.id === row.id);
+    const file = this.byId.get(row.id);
     const viewed = file && isViewed(this.review, file);
     const color = { A: t.ansi2, M: t.ansi3, D: t.ansi1, R: t.muted }[row.status];
     return base.when(active?.id === row.id, (el) => el.bg(t.selected))
@@ -1225,9 +1278,20 @@ export default class SnappyDiff extends View {
             if (e.local_position) this.press = { x: unzoom(e.local_position.x), shift: e.modifiers.shift };
             if (!this.editing) this.handle.focus();
           })
-          .on_scroll_wheel((_e, cx) => { cx.notify(); cx.timer.after(60, (cx) => cx.notify()); })
-          .child(v_virtual_list("diff", this.items.length, this.sizes, (i) => String(i), (range) => {
+          // The list scrolls by itself, drawing the rows that come into view; the rest of the view
+          // only follows when the file at the top changes (the pinned header, the sidebar).
+          .child(v_virtual_list("diff", this.items.length, this.sizes, (i) => String(i), (range, cx) => {
+            // The renderer runs twice a frame, measuring then placing, so the top is compared once
+            // the frame is done, when the placing pass has had the last word.
             this.topIndex = range.start;
+            if (!this.topCheck) {
+              this.topCheck = true;
+              cx.timer.after(0, (cx) => {
+                this.topCheck = false;
+                const top = `${this.activeFile()?.id}|${this.items[this.topIndex]?.t === "file"}`;
+                if (top !== this.topKey) { this.topKey = top; cx.notify(); }
+              });
+            }
             return this.items.slice(range.start, range.end).map((item, i) => this.renderItem(t, code, item, range.start + i));
           }).track_scroll(this.scroll).size_full().on_item_click((key, cx) => this.clickRow(key, cx)))
           .child(Scrollbar.vertical("diff").absolute().inset_0())
@@ -1265,7 +1329,7 @@ export default class SnappyDiff extends View {
     if (item.t === "comment") return this.renderComment(t, item.c);
     if (item.t === "thread") return this.renderThread(t, item.th, code);
     if (item.t === "editor") return this.renderEditor(t, item.e);
-    const m = this.metrics();
+    const m = this.m;
     if (item.t === "split") {
       return row.child(this.renderCell(t, item.left, m, m.side, h, "old", item.f))
         .child(div().w(1).h_full().bg(t.border))
@@ -1322,10 +1386,14 @@ export default class SnappyDiff extends View {
     const lines = [];
     for (const [start, end] of wrapLines(cell.text, cols)) {
       let column = 0;
-      lines.push(div().relative().h(LINE_H).w_full().children(segments(cell, start, end).map((s) => {
-        const left = column * this.charW;
+      // Spaces between tokens need no element of their own: each piece is placed by its column.
+      const pieces = [];
+      for (const s of segments(cell, start, end)) {
+        if (s.marked || s.text.trim()) pieces.push({ ...s, left: column * this.charW });
         column += s.text.length;
-        return div().absolute().top(0).left(left).h(LINE_H).flex().items_center().whitespace_nowrap()
+      }
+      lines.push(div().relative().h(LINE_H).w_full().children(pieces.map((s) => {
+        return div().absolute().top(0).left(s.left).h(LINE_H).flex().items_center().whitespace_nowrap()
           .text_color(s.kind === "comment" ? t.dim : s.kind === "punctuation" ? t.muted : SYNTAX[s.kind] ? t[SYNTAX[s.kind]] : t.foreground)
           .when(s.marked && Boolean(colors.mark), (el) => el.bg(colors.mark).rounded(2))
           .child(s.text);
