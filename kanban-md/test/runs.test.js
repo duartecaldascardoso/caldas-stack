@@ -98,3 +98,26 @@ test("summarize turns an agent's markdown into a lead, points and its question",
   assert.deepEqual(summarize(""), { lead: null, points: [], more: 0, question: null });
   assert.ok(summarize("x".repeat(500)).lead.length <= 240);
 });
+
+test("screenMessage reads an agent's last answer off its screen, without the input box or tool lines", async () => {
+  const { screenMessage } = await import("../mods/kanban-md/runs.js");
+  const rule = "─".repeat(60);
+  const claude = [
+    "❯ fix the pricing test", "", "  Ran 5 shell commands", "",
+    "⏺ The test failed on a stale fixture. I updated it:", "  - prices.json has the new models", "",
+    "✻ Churned for 8m 1s · done 3:57 PM", rule, "❯ ", rule, "  ⏵⏵ auto mode on (shift+tab to cycle)",
+  ].join("\n");
+  assert.deepEqual(screenMessage(claude), { text: "The test failed on a stale fixture. I updated it:\n  - prices.json has the new models", at: null });
+
+  const codex = ["› add a retry", "", "• Added a retry with backoff in client.ts.", "", "› Summarize recent commits", "", "  ? for shortcuts"].join("\n");
+  assert.equal(screenMessage(codex)?.text, "Added a retry with backoff in client.ts.");
+
+  const gemini = [
+    "> explain the cache", "", "✦ The cache keeps parsed rows per file.", "  It drops a file when its blob changes.", "",
+    "╭" + "─".repeat(58) + "╮", "│ > Type your message", "╰" + "─".repeat(58) + "╯", "~/repo (main)   gemini-2.5-pro",
+  ].join("\n");
+  assert.equal(screenMessage(gemini)?.text, "The cache keeps parsed rows per file.\n  It drops a file when its blob changes.");
+
+  assert.equal(screenMessage(""), null);
+  assert.equal(screenMessage(["❯ hi", rule, "❯ ", rule].join("\n")), null);
+});
