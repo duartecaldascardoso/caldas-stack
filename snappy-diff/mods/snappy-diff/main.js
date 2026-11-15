@@ -1,62 +1,35 @@
 // snappy diff for Herdr: review a branch like a pull request, without leaving the window.
-import { View, div, svg } from "gpui-kit";
+import { View, div } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input, Scrollbar, v_virtual_list, VirtualListScrollHandle } from "gpui-base";
 import { props, closeOverlay, focused, notify, agents, panes, hc, appHome, exec, run, settings, theme } from "herdr";
 import * as fs from "fs/promises";
-import { show_fps_monitor, hide_fps_monitor, fps_monitor_visible } from "gpui-fps";
 import * as git from "./git.js";
 import { parsePatch, skippedFiles, firstChange } from "./patch.js";
 import { languageOf } from "./syntax.js";
-import { fileRows, wrapCount, wrapLines, segments } from "./rows.js";
+import { fileRows, wrapCount, wrapLines } from "./rows.js";
 import { treeRows, fileMatches, breakdown } from "./tree.js";
-import { findMoves, isMoved } from "./moved.js";
-import { areas, effort, hints, reviewOrder, pullRequestList } from "./insights.js";
-import { reviewKey, rangeKey, sinceReview, emptyReview, isViewed, changedSinceViewed, toggleViewed, linesText, withStatus, reviewPrompt, reviewPayload, openThreads, threadsAsComments } from "./review.js";
+import { findMoves } from "./moved.js";
+import { reviewOrder, pullRequestList } from "./insights.js";
+import { reviewKey, rangeKey, sinceReview, emptyReview, isViewed, toggleViewed, linesText, withStatus, reviewPrompt, reviewPayload, openThreads, threadsAsComments } from "./review.js";
 import { DEFAULT_PREFS, readPrefs, writePrefs, readReview, writeReview, readLastReviewed, writeLastReviewed } from "./store.js";
+import { CODE_SIZE, LINE_H, HEADER_H, COMMENT_LINE_H, HEADER_PARTS, EDITORS, unzoom, unzoomBounds, icon, alpha, plural, badge } from "./ui.js";
+import { rowView, headerView } from "./lines.js";
+import { overviewView } from "./overview.js";
+import { paletteResults, paletteView } from "./palette.js";
 
-const ICONS = "mods/snappy-diff/icons";
-const CODE_SIZE = 12.5;
-const LINE_H = 20;
-const HEADER_H = 40;
 const HUNK_H = 28;
 const NOTICE_H = 40;
 const TREE_ROW_H = 28;
 const SIDEBAR_W = 288;
 const SCROLLBAR_W = 12;
-const COMMENT_LINE_H = 18;
 const THREAD_LINES = 12; // a thread comment's lines shown before "more on GitHub"
 const THREAD_CHROME = 16 + 2 + 20 + 26; // row padding, border, card padding, header
 const TOOLBAR_H = 48;
 const MENU_LIST_H = 320;
 const EDITOR_H = 96;
 const REFRESH_MS = 2000; // uncommitted changes move under our feet
-// Fixed-width parts of a file header, from the right edge, so a click can tell them apart.
-const HEADER_PARTS = { viewed: 92, stats: 120, comments: 44, editor: 32 };
 const HEADER_PAD = 14;
 const RIGHT_MENUS = new Set(["settings", "agent", "kinds"]);
-const EDITORS = { zed: "Zed", vscode: "VS Code", cursor: "Cursor" };
-const SYNTAX = { keyword: "ansi5", string: "ansi2", number: "ansi3", constant: "ansi3", function: "ansi4", type: "ansi6", property: "ansi4" };
-
-// Herdr scales a mod by the person's zoom after layout: sizes and positions it reports are on-screen
-// pixels, while the lengths a mod sets are scaled. Measurements come back through this.
-const unzoom = (px) => px / (settings().zoom || 1);
-const unzoomBounds = (b) => ({ x: unzoom(b.x), y: unzoom(b.y), width: unzoom(b.width), height: unzoom(b.height) });
-const icon = (name, size = 14) => svg(`${ICONS}/${name}.svg`).size(size).flex_none();
-const alpha = (color, hex) => (/^#[0-9a-f]{6}$/i.test(color) ? color + hex : color);
-const plural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
-
-// A badge for a file's type, in place of an icon set: TS, {}, #, M↓ and the like.
-function badge(name, t) {
-  const ext = name.includes(".") ? name.split(".").pop().toLowerCase() : "";
-  const table = {
-    ts: ["TS", t.ansi4], tsx: ["TS", t.ansi4], mts: ["TS", t.ansi4], js: ["JS", t.ansi3], jsx: ["JS", t.ansi3], mjs: ["JS", t.ansi3],
-    json: ["{}", t.ansi3], rs: ["RS", t.ansi1], py: ["PY", t.ansi4], go: ["GO", t.ansi6], md: ["M↓", t.ansi4], mdx: ["M↓", t.ansi4],
-    css: ["#", t.ansi5], scss: ["#", t.ansi5], html: ["<>", t.ansi1], svg: ["<>", t.ansi3], yml: ["Y", t.ansi1], yaml: ["Y", t.ansi1],
-    toml: ["T", t.ansi1], sh: ["$", t.ansi2], lock: ["≡", t.muted], sql: ["DB", t.ansi6],
-  };
-  const [label, color] = table[ext] ?? ["·", t.muted];
-  return div().w(18).flex_none().text_size(9.5).font_semibold().text_color(color).child(label);
-}
 
 export default class SnappyDiff extends View {
   init(_props, cx) {
@@ -948,64 +921,8 @@ export default class SnappyDiff extends View {
     cx.notify();
   }
 
-  paletteResults() {
-    const query = this.paletteInput.value().trim();
-    if (this.palette === "lines") {
-      if (query.length < 2) return [];
-      const needle = query.toLowerCase();
-      const out = [];
-      for (const f of this.files) {
-        for (const h of f.hunks) {
-          let old = h.oldStart;
-          let next = h.newStart;
-          for (const line of h.lines) {
-            const side = line.kind === "-" ? "old" : "new";
-            const n = side === "old" ? old : next;
-            if (line.kind !== "+") old++;
-            if (line.kind !== "-") next++;
-            if (!line.text.toLowerCase().includes(needle)) continue;
-            out.push({ label: line.text.trim(), hint: `${f.name}:${n}`, run: (cx) => { this.focusFile(f.id, cx); this.jumpToLine(f.id, side, n, cx); } });
-            if (out.length >= 100) return out;
-          }
-        }
-      }
-      return out;
-    }
-    const s = this.source;
-    const files = this.files.filter((f) => !query || fileMatches(f, query)).slice(0, 40)
-      .map((f) => ({ label: f.name, hint: `+${f.add} −${f.del}`, run: (cx) => this.focusFile(f.id, cx) }));
-    const commits = this.commits.filter((c) => !query || `${c.sha} ${c.subject}`.toLowerCase().includes(query.toLowerCase())).slice(0, 20)
-      .map((c) => ({ label: `${c.sha.slice(0, 7)} ${c.subject}`, hint: "commit", run: (cx) => this.reload({ commit: c.sha }, cx) }));
-    const actions = [
-      ["Review next unviewed file", "n", (cx) => this.reviewNext(cx)],
-      ["Mark file viewed", "v", (cx) => { const f = this.activeFile(); if (f) this.toggleViewed(f, cx, true); }],
-      ["Open file in " + EDITORS[this.prefs.editor], "o", (cx) => this.openInEditor(this.activeFile(), cx)],
-      ["Send comments to the agent", "", (cx) => this.sendToAgent(cx)],
-      ["Copy comments as a prompt", "", (cx) => this.copyReview(cx)],
-      ["Toggle sidebar", "⌘B", (cx) => this.setPref("sidebar", !this.prefs.sidebar, cx)],
-      [this.prefs.diffStyle === "split" ? "Unified view" : "Split view", "", (cx) => this.setPref("diffStyle", this.prefs.diffStyle === "split" ? "unified" : "split", cx)],
-      ["Collapse or expand all files", "", (cx) => this.toggleAll(cx)],
-      [`${s.ignoreWhitespace ? "Show" : "Ignore"} whitespace changes`, "", (cx) => this.reload({ ignoreWhitespace: !s.ignoreWhitespace }, cx)],
-      ["Reload", "", (cx) => this.reload({}, cx)],
-      // Herdr's own frame-rate overlay, to see how the diff scrolls on this machine.
-      [fps_monitor_visible() ? "Hide frame rate" : "Show frame rate", "", () => (fps_monitor_visible() ? hide_fps_monitor() : show_fps_monitor())],
-      ...(props()?.overlay ? [["Open in a tab", "t", () => this.openInTab()]] : []),
-      ["Overview", "", (cx) => this.openOverview(cx)],
-      [`${this.prefs.wholeFiles ? "Folded" : "Whole"} files`, "", (cx) => this.setWholeFiles(!this.prefs.wholeFiles, cx)],
-      ...(this.unsentComments().length ? [["Send comments to GitHub", "", (cx) => this.sendToGitHub(cx)]] : []),
-    ].filter(([label]) => !query || label.toLowerCase().includes(query.toLowerCase()))
-      .map(([label, hint, run]) => ({ label, hint: hint || "action", run }));
-    const shownPr = this.prShown() ? this.pr.number : null;
-    const prs = (this.prs ?? []).filter((p) => p.number !== shownPr)
-      .filter((p) => !query || `#${p.number} ${p.title}`.toLowerCase().includes(query.toLowerCase())).slice(0, 20)
-      .map((p) => ({ label: `#${p.number} ${p.title}`, hint: p.hint || "pull request", run: (cx) => cx.spawn((cx) => this.openPullRequest(this.source.repo, p.number, cx)) }));
-    // With nothing typed, pull requests asking for your review come first.
-    const asked = prs.filter((p) => p.hint.startsWith("your review"));
-    return query ? [...files, ...prs, ...commits, ...actions] : [...asked, ...files, ...prs.filter((p) => !asked.includes(p)), ...commits, ...actions];
-  }
-
   paletteKey(k, cx) {
-    const results = this.paletteResults();
+    const results = paletteResults(this);
     if (k === "escape") { this.palette = null; this.handle.focus(); }
     else if (k === "down") this.paletteIndex = Math.min(results.length - 1, this.paletteIndex + 1);
     else if (k === "up") this.paletteIndex = Math.max(0, this.paletteIndex - 1);
@@ -1091,8 +1008,8 @@ export default class SnappyDiff extends View {
         .child(this.renderMain(t, code, active)))
       .on_mouse_down("left", (e) => { if (e.bounds) this.viewBounds = unzoomBounds(e.bounds); })
       .when(Boolean(this.menu) && Boolean(this.source), (el) => el.child(this.renderMenu(t)))
-      .when(this.overview, (el) => el.child(this.renderOverview(t)))
-      .when(Boolean(this.palette), (el) => el.child(this.renderPalette(t)))
+      .when(this.overview, (el) => el.child(overviewView(this, t)))
+      .when(Boolean(this.palette), (el) => el.child(paletteView(this, t)))
       // Measures the code font's character width, which wrapping is computed from.
       .child(div().id("probe").absolute().top(-100).left(0).opacity(0).whitespace_nowrap().text_size(CODE_SIZE)
         .when(Boolean(code), (el) => el.font_family(code))
@@ -1292,11 +1209,11 @@ export default class SnappyDiff extends View {
                 if (top !== this.topKey) { this.topKey = top; cx.notify(); }
               });
             }
-            return this.items.slice(range.start, range.end).map((item, i) => this.renderItem(t, code, item, range.start + i));
+            return this.items.slice(range.start, range.end).map((item, i) => rowView(this, t, code, item, range.start + i));
           }).track_scroll(this.scroll).size_full().on_item_click((key, cx) => this.clickRow(key, cx)))
           .child(Scrollbar.vertical("diff").absolute().inset_0())
           .when(Boolean(pinned), (el) => el.child(div().absolute().top(0).left(0).right(0)
-            .child(this.renderHeader(t, pinned, true))))));
+            .child(headerView(this, t, pinned, true))))));
   }
 
   pinnedFile() {
@@ -1314,309 +1231,4 @@ export default class SnappyDiff extends View {
       .when(Boolean(s) && !this.error && !this.loading, (el) => el.child(div().text_size(12).text_color(t.dim).child("Pick another base or head above.")));
   }
 
-  renderItem(t, code, item, index) {
-    if (item.t === "file") return this.renderHeader(t, item.f, false, index);
-    const h = this.sizes[index];
-    const row = h_flex().h(h).w_full().font_family(code).text_size(CODE_SIZE);
-    if (item.t === "hunk") {
-      return row.items_center().px(16).gap(10).bg(alpha(t.foreground, "08")).text_color(t.dim)
-        .cursor_pointer().hover((st) => st.bg(alpha(t.foreground, "10")))
-        .child(icon("expand", 12))
-        .child(plural(item.hidden, "unmodified line"))
-        .when(Boolean(item.context), (el) => el.child(div().flex_1().min_w(0).truncate().text_color(t.muted).child(item.context)));
-    }
-    if (item.t === "notice") return row.items_center().px(16).text_color(t.dim).child(item.text);
-    if (item.t === "comment") return this.renderComment(t, item.c);
-    if (item.t === "thread") return this.renderThread(t, item.th, code);
-    if (item.t === "editor") return this.renderEditor(t, item.e);
-    const m = this.m;
-    if (item.t === "split") {
-      return row.child(this.renderCell(t, item.left, m, m.side, h, "old", item.f))
-        .child(div().w(1).h_full().bg(t.border))
-        .child(this.renderCell(t, item.right, m, m.width - m.side - 1, h, "new", item.f));
-    }
-    return row.child(this.renderUnified(t, item, m, h));
-  }
-
-  lineColors(t, kind) {
-    if (kind === "add") return { bg: alpha(t.ansi2, "1c"), gutter: alpha(t.ansi2, "30"), mark: alpha(t.ansi2, "48"), bar: t.ansi2 };
-    if (kind === "del") return { bg: alpha(t.ansi1, "1c"), gutter: alpha(t.ansi1, "30"), mark: alpha(t.ansi1, "48"), bar: t.ansi1 };
-    return { bg: null, gutter: null, mark: null, bar: null };
-  }
-
-  // Moved code needs little reading: it is faded.
-  moved(file, cell) {
-    return cell.kind !== "ctx" && isMoved(this.moves, file.id, cell.kind === "del" ? "old" : "new", cell.n ?? (cell.kind === "del" ? cell.old : cell.new));
-  }
-
-  renderCell(t, cell, m, width, h, side, file) {
-    if (!cell) {
-      return div().w(width).h(h).flex_none().relative().overflow_hidden().bg(alpha(t.foreground, "05"))
-        .child(svg(`${ICONS}/hatch.svg`).absolute().top(0).left(0).w(1200).h(1200).text_color(alpha(t.foreground, "1c")));
-    }
-    const colors = this.lineColors(t, cell.kind);
-    const commented = this.editing && this.editing.file && cell.n >= this.editing.start && cell.n <= this.editing.end
-      && this.editing.side === (side === "old" && cell.kind !== "ctx" ? "old" : "new");
-    return h_flex().w(width).h(h).flex_none().items_start().when(Boolean(colors.bg), (el) => el.bg(colors.bg))
-      .when(commented, (el) => el.bg(alpha(t.accent, "26")))
-      .child(h_flex().w(m.number).h_full().flex_none().items_start().justify_end().pr(10).text_color(colors.bar ?? t.dim)
-        .when(Boolean(colors.gutter), (el) => el.bg(colors.gutter).border_l_2().border_color(colors.bar))
-        .child(div().h(LINE_H).flex().items_center().child(String(cell.n))))
-      .child(this.renderText(t, cell, m.cols, colors).when(this.moved(file, cell), (el) => el.opacity(0.45)));
-  }
-
-  renderUnified(t, item, m, h) {
-    const cell = item.cell;
-    const colors = this.lineColors(t, cell.kind);
-    const number = (n) => h_flex().w(m.number).h(LINE_H).flex_none().justify_end().pr(10).child(n == null ? "" : String(n));
-    return h_flex().w_full().h(h).items_start().when(Boolean(colors.bg), (el) => el.bg(colors.bg))
-      .child(h_flex().h_full().flex_none().items_start().text_color(colors.bar ?? t.dim)
-        .when(Boolean(colors.gutter), (el) => el.bg(colors.gutter).border_l_2().border_color(colors.bar))
-        .child(number(item.old)).child(number(item.new)))
-      .child(div().w(16).flex_none().h(LINE_H).flex().items_center().justify_center().text_color(colors.bar ?? t.dim)
-        .child(cell.kind === "add" ? "+" : cell.kind === "del" ? "-" : ""))
-      .child(this.renderText(t, cell, m.cols, colors).when(this.moved(item.f, cell), (el) => el.opacity(0.45)));
-  }
-
-  // The cell's text, wrapped at `cols` characters, coloured by syntax and word change. Each
-  // coloured piece is placed at its own column: laid side by side, pieces push each other along,
-  // because every piece's width is rounded up to a whole pixel, and a line would outgrow the
-  // width it was wrapped to.
-  renderText(t, cell, cols, colors) {
-    const lines = [];
-    for (const [start, end] of wrapLines(cell.text, cols)) {
-      let column = 0;
-      // Spaces between tokens need no element of their own: each piece is placed by its column.
-      const pieces = [];
-      for (const s of segments(cell, start, end)) {
-        if (s.marked || s.text.trim()) pieces.push({ ...s, left: column * this.charW });
-        column += s.text.length;
-      }
-      lines.push(div().relative().h(LINE_H).w_full().children(pieces.map((s) => {
-        return div().absolute().top(0).left(s.left).h(LINE_H).flex().items_center().whitespace_nowrap()
-          .text_color(s.kind === "comment" ? t.dim : s.kind === "punctuation" ? t.muted : SYNTAX[s.kind] ? t[SYNTAX[s.kind]] : t.foreground)
-          .when(s.marked && Boolean(colors.mark), (el) => el.bg(colors.mark).rounded(2))
-          .child(s.text);
-      })));
-    }
-    return v_flex().flex_1().min_w(0).pl(6).children(lines);
-  }
-
-  renderHeader(t, f, pinned, index = -1) {
-    const collapsed = this.isCollapsed(f);
-    const viewed = isViewed(this.review, f);
-    const count = this.comments.filter((c) => c.file === f.id && !c.outdated).length;
-    const slash = f.name.lastIndexOf("/");
-    const label = f.generated ? "generated" : f.large ? "large" : null;
-    const tag = (text, outline) => div().ml(2).px(6).py(1).rounded(4).text_size(11).text_color(t.muted)
-      .when(outline, (el) => el.border_1().border_color(t.border)).when(!outline, (el) => el.bg(t.raised)).child(text);
-    const part = (width) => h_flex().w(width).h_full().flex_none().items_center().justify_end();
-    const header = h_flex().h(HEADER_H).w_full().pl(14).pr(14).gap(8).items_center().bg(t.background).text_size(13)
-      .when(index > 0 || pinned, (el) => el.border_t_1()).when(pinned || !collapsed, (el) => el.border_b_1()).border_color(t.border)
-      .when(pinned, (el) => el.shadow_md())
-      .child(div().text_color(t.muted).child(icon(collapsed ? "chevron-right" : "chevron-down", 14)))
-      .child(badge(f.name, t))
-      .child(h_flex().min_w(0).flex_1().gap(0).truncate()
-        .when(slash > 0, (el) => el.child(div().text_color(t.muted).child(f.name.slice(0, slash + 1))))
-        .child(div().text_color(viewed ? t.muted : t.foreground).child(f.name.slice(slash + 1)))
-        .when(Boolean(f.prevName), (el) => el.child(div().ml(8).text_color(t.dim).child(`← ${f.prevName}`))))
-      .when(Boolean(label), (el) => el.child(tag(label, false)))
-      .when(changedSinceViewed(this.review, f), (el) => el.child(tag("changed since viewed", true)))
-      .when((this.moves.perFile.get(f.id) ?? 0) > 0, (el) => el.child(div().ml(2).text_size(11.5).text_color(t.dim).child(`${this.moves.perFile.get(f.id)} moved`)))
-      .child(part(HEADER_PARTS.editor).child(f.type === "deleted" ? div() : div().text_color(t.dim).child(icon("editor", 13))))
-      .child(part(HEADER_PARTS.comments).gap(4).text_size(12).text_color(t.muted).when(count > 0, (el) => el.child(icon("comment", 13)).child(String(count))))
-      .child(part(HEADER_PARTS.stats).gap(6).text_size(12)
-        .child(div().text_color(t.ansi1).child(`−${f.del}`)).child(div().text_color(t.ansi2).child(`+${f.add}`)))
-      .child(part(HEADER_PARTS.viewed).gap(6).text_size(12).text_color(t.muted)
-        .child(div().size(14).rounded(3).border_1().border_color(viewed ? t.accent : t.input).when(viewed, (el) => el.bg(t.accent))
-          .flex().items_center().justify_center().text_color(t.accent_foreground).when(viewed, (el) => el.child(icon("check", 10))))
-        .child("Viewed"));
-    if (!pinned) return header;
-    // The pinned copy sits outside the list, so it can have handlers of its own.
-    return header.id("pinned").cursor_pointer().on_mouse_down("left", (e, cx) => {
-      cx.stop_propagation();
-      if (e.bounds) this.pressHeader(f, this.headerPart(unzoom(e.bounds.x + e.bounds.width - e.position.x)), cx);
-    });
-  }
-
-  // A GitHub review thread under its line: whose it is, the conversation, and Resolve.
-  renderThread(t, thread, code) {
-    const lines = this.threadLines(thread, this.threadCols());
-    const range = thread.start === thread.end ? `Line ${thread.end}` : `Lines ${thread.start}–${thread.end}`;
-    return h_flex().w_full().px(16).py(8).bg(alpha(t.ansi4, "0d"))
-      .child(v_flex().flex_1().min_w(0).p(10).rounded(8).border_1().border_color(alpha(t.ansi4, "66")).bg(t.popover)
-        .child(h_flex().h(26).gap(8).items_center().text_size(11.5).text_color(t.dim)
-          .child(div().text_color(t.ansi4).child(icon("pull", 12)))
-          .child(div().text_color(t.foreground).child("GitHub"))
-          .child(div().flex_1().child(`${range} · ${plural(thread.comments.length, "comment")}`))
-          .child(div().w(64).flex().justify_end().text_color(t.muted).child("Resolve")))
-        .children(lines.map((line) => div().h(COMMENT_LINE_H).flex().items_center().whitespace_nowrap().text_size(12.5)
-          .when(Boolean(code), (el) => el.font_family(code))
-          .text_color(line.kind === "author" ? t.ansi4 : line.kind === "more" ? t.dim : t.foreground)
-          .child(line.text))));
-  }
-
-  renderComment(t, c) {
-    return h_flex().w_full().px(16).py(8).bg(alpha(t.foreground, "05"))
-      .child(v_flex().flex_1().min_w(0).p(10).gap(4).rounded(8).border_1().border_color(t.border).bg(t.popover)
-        .child(h_flex().gap(8).text_size(11.5).text_color(t.dim)
-          .child(icon("comment", 12))
-          .child(div().flex_1().child(c.start === c.end ? `Line ${c.end}` : `Lines ${c.start}–${c.end}`))
-          .when(Boolean(c.sent), (el) => el.child(div().px(6).rounded(4).bg(t.raised).text_color(t.muted).child("on GitHub")))
-          .child(div().w(46).flex().justify_end().text_color(t.muted).child("Edit"))
-          .child(div().w(46).flex().justify_end().text_color(t.muted).child("Delete")))
-        .child(div().text_size(13).text_color(t.foreground).child(c.text)));
-  }
-
-  renderEditor(t, e) {
-    const lines = e.start === e.end ? `Line ${e.end}` : `Lines ${e.start}–${e.end}`;
-    return h_flex().w_full().px(16).py(8).bg(alpha(t.accent, "14"))
-      .child(v_flex().flex_1().p(10).gap(8).rounded(8).border_1().border_color(t.accent).bg(t.popover)
-        .child(Input.new(this.commentInput).h(30).w_full().text_size(13).text_color(t.foreground))
-        .child(h_flex().gap(8).items_center().text_size(11.5)
-          .child(div().flex_1().text_color(t.dim).child(`${lines} · ↵ to save, esc to cancel`))
-          .child(div().w(70).flex().justify_end().text_color(t.muted).child("Cancel"))
-          .child(div().w(76).py(4).flex().justify_center().rounded(6).bg(t.solid).text_color(t.solid_foreground).child("Comment"))));
-  }
-
-  renderOverview(t) {
-    const files = this.files;
-    const seen = (f) => isViewed(this.review, f);
-    const work = effort(files, this.moves, seen);
-    const kinds = breakdown(files);
-    const add = files.reduce((n, f) => n + f.add, 0);
-    const del = files.reduce((n, f) => n + f.del, 0);
-    const count = (type) => files.filter((f) => (type === "rename" ? f.type.startsWith("rename") : f.type === type)).length;
-    const viewed = files.filter(seen).length;
-    const progress = work.lines ? Math.round((work.viewedLines / work.lines) * 100) : 100;
-    const open = this.comments.filter((c) => !c.outdated).length;
-    const addressed = this.comments.length - open;
-    const prefix = this.overviewPrefix;
-    const where = areas(files, prefix, seen);
-    const largest = [...files].sort((a, b) => b.add + b.del - (a.add + a.del)).slice(0, 8);
-    const flags = hints(files, this.churn);
-    const s = this.source;
-    const subject = s.commit ? `commit ${s.commit.slice(0, 7)}` : `${s.since ? s.since.slice(0, 7) : s.base}...${s.head || "working tree"}`;
-    const leave = (cx) => { this.overview = false; this.handle.focus(); cx.notify(); };
-    const n = (v) => v.toLocaleString();
-
-    const bar = (a, d, max, width = 140) => h_flex().w(width).h(6).gap(2).flex_none()
-      .when(a > 0, (el) => el.child(div().h_full().rounded(2).bg(t.ansi2).w(Math.max(2, Math.round((width * a) / max)))))
-      .when(d > 0, (el) => el.child(div().h_full().rounded(2).bg(t.ansi1).w(Math.max(2, Math.round((width * d) / max)))));
-    const tile = (label, value, note, extra) => v_flex().flex_1().min_w(0).p(12).gap(4).rounded(8).border_1().border_color(t.border).bg(t.background)
-      .child(div().text_size(11.5).text_color(t.dim).child(label))
-      .child(div().text_size(20).font_semibold().child(value))
-      .when(Boolean(extra), (el) => el.child(extra))
-      .child(div().text_size(11.5).text_color(t.dim).truncate().child(note));
-    const panel = (title, aside, body) => v_flex().min_w(0).p(14).gap(10).rounded(8).border_1().border_color(t.border).bg(t.background)
-      .child(h_flex().gap(8).items_center().child(div().flex_1().text_size(13).font_medium().child(title)).when(Boolean(aside), (el) => el.child(aside)))
-      .child(body);
-    const row = (id, onClick) => h_flex().id(id).h(30).px(8).gap(10).items_center().rounded(6).cursor_pointer().hover((st) => st.bg(t.hover))
-      .on_click((_e, cx) => onClick(cx));
-    const name = (path) => {
-      const slash = path.lastIndexOf("/", path.length - 2);
-      return h_flex().flex_1().min_w(0).truncate()
-        .when(slash >= 0, (el) => el.child(div().text_color(t.muted).child(path.slice(0, slash + 1))))
-        .child(div().child(path.slice(slash + 1)));
-    };
-    const maxArea = Math.max(1, ...where.map((a) => Math.max(a.add, a.del)));
-    const maxFile = Math.max(1, ...largest.map((f) => Math.max(f.add, f.del)));
-    const maxKind = Math.max(1, ...kinds.map((k) => Math.max(k.add, k.del)));
-    const crumbs = prefix.split("/").filter(Boolean);
-
-    const whereBody = v_flex().gap(1).children(where.map((a, i) => row(`area-${i}`, (cx) => {
-      if (a.deeper) { this.overviewPrefix = a.path; cx.notify(); return; }
-      leave(cx);
-      this.focusFile(files.find((f) => f.name === a.path).id, cx);
-    })
-      .child(name(a.name + (a.deeper ? "/" : "")))
-      .child(div().w(70).flex().justify_end().text_size(11.5).text_color(t.dim).child(plural(a.files, "file")))
-      .child(bar(a.add, a.del, maxArea))
-      .child(div().w(54).flex().justify_end().text_size(11.5).text_color(a.viewed === a.files ? t.ansi2 : t.dim).child(`${a.viewed}/${a.files}`))));
-    const breadcrumb = h_flex().gap(4).text_size(11.5).text_color(t.dim)
-      .child(div().id("crumb-root").cursor_pointer().hover((st) => st.text_color(t.foreground)).on_click((_e, cx) => { this.overviewPrefix = ""; cx.notify(); }).child("all"))
-      .children(crumbs.map((part, i) => h_flex().gap(4).child("/").child(div().id(`crumb-${i}`).cursor_pointer().hover((st) => st.text_color(t.foreground))
-        .on_click((_e, cx) => { this.overviewPrefix = `${crumbs.slice(0, i + 1).join("/")}/`; cx.notify(); }).child(part))));
-
-    return div().absolute().inset_0().flex().justify_center().py(36).bg(alpha(t.background, "b3"))
-      .on_mouse_down("left", (_e, cx) => leave(cx))
-      .child(v_flex().id("overview").w(1040).h_full().rounded(12).border_1().border_color(t.border).bg(t.popover).shadow_lg()
-        .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
-        .child(h_flex().px(20).py(14).gap(12).items_center().border_b_1().border_color(t.border)
-          .child(v_flex().flex_1().min_w(0).gap(2)
-            .child(div().text_size(15).font_semibold().child("Overview"))
-            .child(div().text_size(12).text_color(t.dim).font_family(settings().font_family).truncate().child(this.ms != null ? `${subject} · ${this.ms} ms` : subject)))
-          .when(viewed < files.length, (el) => el.child(h_flex().id("review-next").h(30).px(12).gap(6).items_center().rounded(6).bg(t.solid)
-            .text_color(t.solid_foreground).text_size(12.5).cursor_pointer().on_click((_e, cx) => { leave(cx); this.reviewNext(cx); })
-            .child("Review next file")))
-          .child(this.button("overview-close", icon("x"), (cx) => leave(cx))))
-        .child(v_flex().id("overview-body").flex_1().min_h(0).overflow_y_scrollbar().p(18).gap(14)
-          .child(h_flex().gap(10)
-            .child(tile("Files", n(files.length), [count("new") && `${count("new")} new`, count("change") && `${count("change")} changed`, count("deleted") && `${count("deleted")} deleted`, count("rename") && `${count("rename")} renamed`].filter(Boolean).join(" · ")))
-            .child(tile("Lines", h_flex().gap(8).child(div().text_color(t.ansi2).child(`+${n(add)}`)).child(div().text_color(t.ansi1).child(`−${n(del)}`)),
-              [`${n(work.lines)} to read`, work.moved && `${n(work.moved)} moved`, work.skipped && `${n(work.skipped)} generated`].filter(Boolean).join(" · ")))
-            .child(tile("Review time", work.minutes < 60 ? `~${work.minutes} min` : `~${Math.floor(work.minutes / 60)} h ${work.minutes % 60} min`, "at 400 lines an hour"))
-            .child(tile("Reviewed", `${progress}%`, `${viewed} of ${plural(files.length, "file")} viewed`,
-              div().h(4).w_full().rounded(2).bg(t.border).child(div().h_full().rounded(2).bg(t.ansi2).w(Math.round(2 * progress)))))
-            .child(tile("Comments", n(open), addressed ? `${addressed} addressed` : open ? "open" : "none yet")))
-          .child(h_flex().gap(12).items_start()
-            .child(div().flex_1().min_w(0).child(panel("Where", breadcrumb, whereBody)))
-            .child(div().w(330).flex_none().child(panel("Kinds", null, v_flex().gap(1).children(kinds.map((k) => row(`kind-${k.id}`, (cx) => {
-              leave(cx);
-              this.filterInput.set_value(`is:${k.id}`);
-              this.filter = `is:${k.id}`;
-              if (!this.prefs.sidebar) this.setPref("sidebar", true, cx);
-              cx.notify();
-            }).child(div().flex_1().child(k.label)).child(bar(k.add, k.del, maxKind, 110))
-              .child(div().w(80).flex().justify_end().text_size(11.5).text_color(t.dim).child(`+${n(k.add)} −${n(k.del)}`))))))))
-          .child(h_flex().gap(12).items_start()
-            .child(div().flex_1().min_w(0).child(panel("Largest files", null, v_flex().gap(1).children(largest.map((f, i) => row(`large-${i}`, (cx) => { leave(cx); this.focusFile(f.id, cx); })
-              .child(badge(f.name, t))
-              .child(h_flex().flex_1().min_w(0).gap(8)
-                .child(div().flex_none().child(f.name.split("/").pop()))
-                .child(div().min_w(0).truncate().text_size(11.5).text_color(t.dim).child(f.name.includes("/") ? f.name.slice(0, f.name.lastIndexOf("/")) : "")))
-              .child(bar(f.add, f.del, maxFile, 110))
-              .child(div().w(84).flex().justify_end().text_size(11.5).text_color(t.dim).child(`+${n(f.add)} −${n(f.del)}`)))))))
-            .child(div().flex_1().min_w(0).child(panel("Worth a closer look", null, flags.length
-              ? v_flex().gap(10).children(flags.map((h) => v_flex().gap(4)
-                .child(h_flex().gap(8).items_center().child(div().size(6).rounded(3).bg(t.ansi3)).child(div().text_size(12.5).child(h.label)))
-                .child(div().pl(14).text_size(11.5).text_color(t.dim).child(h.detail))
-                .when(h.files.length > 0, (el) => el.child(h_flex().pl(14).gap(6).flex_wrap().children(h.files.slice(0, 6).map((f, i) =>
-                  div().id(`hint-${h.id}-${i}`).px(6).py(1).rounded(4).bg(t.raised).text_size(11).text_color(t.muted).cursor_pointer()
-                    .hover((st) => st.text_color(t.foreground)).on_click((_e, cx) => { leave(cx); this.focusFile(f.id, cx); })
-                    .child(f.name.split("/").pop())))))))
-              : div().text_size(12).text_color(t.dim).child("Nothing stands out.")))))
-          .when(this.commits.length > 0, (el) => {
-            const maxCommit = Math.max(1, ...this.commits.map((c) => Math.max(c.add, c.del)));
-            return el.child(panel("Commits", div().text_size(11.5).text_color(t.dim).child(`${plural(this.commits.length, "commit")} · ${plural(new Set(this.commits.map((c) => c.author)).size, "author")}`),
-              v_flex().gap(1).children(this.commits.slice(0, 50).map((c, i) => row(`commit-${i}`, (cx) => { leave(cx); this.reload({ commit: c.sha }, cx); })
-                .when(c.sha === s.commit, (r) => r.bg(t.selected))
-                .child(div().w(64).flex_none().text_size(11.5).text_color(t.dim).font_family(settings().font_family).child(c.sha.slice(0, 7)))
-                .child(div().flex_1().min_w(0).truncate().child(c.subject))
-                .child(div().w(150).flex_none().truncate().text_size(11.5).text_color(t.dim).child(`${c.author}, ${c.date}`))
-                .child(bar(c.add, c.del, maxCommit, 90))))));
-          })));
-  }
-
-  renderPalette(t) {
-    const results = this.paletteResults();
-    const placeholder = this.palette === "lines" ? "Search the code in this diff" : "Go to a file, commit or action";
-    return div().absolute().inset_0().flex().justify_center().bg(alpha(t.background, "99"))
-      .on_mouse_down("left", (_e, cx) => { this.palette = null; this.handle.focus(); cx.notify(); })
-      .child(v_flex().id("palette").mt(80).w(600).max_h(460).rounded(10).border_1().border_color(t.border).bg(t.popover).shadow_lg()
-        .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
-        .child(h_flex().h(44).px(12).gap(10).items_center().border_b_1().border_color(t.border)
-          .child(div().text_color(t.dim).child(icon("search", 15)))
-          .child(div().flex_1().child(Input.new(this.paletteInput).w_full().text_size(14)))
-          .child(div().text_size(11).text_color(t.dim).child(placeholder)))
-        .child(v_flex().id("palette-results").max_h(400).overflow_y_scrollbar().p(6).gap(1)
-          .when(!results.length, (el) => el.child(div().p(12).text_size(12.5).text_color(t.dim)
-            .child(this.palette === "lines" ? "Type at least two characters." : "Nothing matches.")))
-          .children(results.slice(0, 120).map((r, i) => h_flex().id(`result-${i}`).h(32).px(10).gap(10).items_center().rounded(6).cursor_pointer()
-            .when(i === this.paletteIndex, (el) => el.bg(t.hover)).hover((s) => s.bg(t.hover))
-            .on_click((_e, cx) => this.pickResult(r, cx))
-            .child(div().flex_1().min_w(0).truncate().text_size(13)
-              .when(this.palette === "lines", (el) => el.font_family(settings().font_family)).child(r.label))
-            .child(div().flex_none().text_size(11.5).text_color(t.dim).child(r.hint))))));
-  }
 }
