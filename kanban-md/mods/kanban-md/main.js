@@ -12,7 +12,7 @@ import { parseRuns, recordPlaybook } from "./runs.js";
 import { PAD_Y, CHIPS_GAP, CARD_GAP, INPUT_H, LINE_H, wrapText, cardHeight, chipLayout, chipsOf } from "./cards.js";
 import { projectOf, isRepository, currentBranch, commitsAhead, push, checkout } from "./git.js";
 import { statusesOf, currentPullRequest, pullRequestFrom, createPullRequest, openIssues, showIssue, failedRun } from "./github.js";
-import { pickAgent, lastAgentMessage } from "./agents.js";
+import { installedAgents, pstackInstalled, lastAgentMessage } from "./agents.js";
 import { alpha, unzoom, keycaps, sectionLabel, agentMark, chipRowsView } from "./ui.js";
 import { helpView, cardRunView } from "./inspector.js";
 import { SetupPage } from "./setup-page.js";
@@ -75,6 +75,15 @@ function storedBoard() {
 
 function storeBoard(board) {
   try { localStorage.setItem("board", board); } catch { /* not kept: opens the first board next time */ }
+}
+
+// The agent started last (its key), offered first next time.
+function storedAgent() {
+  try { return localStorage.getItem("agent"); } catch { return null; }
+}
+
+function storeAgent(key) {
+  try { localStorage.setItem("agent", key); } catch { /* not kept: the first installed agent is offered */ }
 }
 
 // ⌘⇧K opens the board's own tab, so it keeps running: following agents and GitHub, and telling
@@ -366,7 +375,8 @@ export default class Kanban extends View {
     if (this.ask) {
       const ask = this.ask;
       this.ask = null;
-      if (event.keystroke === "y" || event.keystroke === "enter") ask.run(cx);
+      if (event.keystroke === "tab" && ask.next) ask.next(cx);
+      else if (event.keystroke === "y" || event.keystroke === "enter") ask.run(cx);
       else ask.cancel?.(cx);
       cx.notify();
       cx.stop_propagation();
@@ -610,11 +620,25 @@ export default class Kanban extends View {
 
   // Working on cards: start an agent on a card, and follow the agents working on them.
 
-  // The first installed agent, or a toast saying there is none.
-  async agentToStart() {
-    const picked = await pickAgent();
-    if (!picked) notify({ title: "No agent to start", body: "Install one Herdr knows, like Claude Code or Codex.", level: "warning" });
-    return picked;
+  // Asks which agent to start, any installed one Herdr knows, the one started last offered first:
+  // tab offers the next. `question(agent, pstack)` is the ask; its run gets the agent chosen.
+  async askAgent(question, cx) {
+    const [agents, pstack] = await Promise.all([installedAgents(storedAgent()), pstackInstalled()]);
+    if (!agents.length) {
+      notify({ title: "No agent to start", body: "Install one Herdr knows, like Claude Code, Codex or Gemini.", level: "warning" });
+      return;
+    }
+    const offer = (i) => {
+      const agent = agents[i];
+      const ask = question(agent, pstack && agent.key === "claude");
+      const run = ask.run;
+      this.askFor({
+        ...ask,
+        run: (cx) => { storeAgent(agent.key); run(cx); },
+        next: agents.length > 1 ? (cx) => offer((i + 1) % agents.length) : null,
+      }, cx);
+    };
+    offer(0);
   }
 
   // The folder checked out on branch, or a toast saying why there isn't one.
@@ -634,16 +658,11 @@ export default class Kanban extends View {
     const row = this.rows[col];
     const branch = this.branchOf(card) ?? branchFor(withoutLinks(card));
     const issue = this.linksOf(card)?.issue?.n ?? null;
-    cx.spawn(async (cx) => {
-      const picked = await this.agentToStart();
-      if (!picked) return;
-      const { agent, pstack } = picked;
-      const playbook = pstack ? ` with pstack ${playbookOf(withoutLinks(card)).playbook ?? "poteto-mode"}` : "";
-      this.askFor({
-        prompt: `Start ${agent.name ?? "an agent"}${playbook} on ${branch} in a new worktree?`, yes: "start",
-        run: (cx) => this.startWork({ col, row, card, branch, repo, issue, agent, pstack }, cx),
-      }, cx);
-    });
+    cx.spawn((cx) => this.askAgent((agent, pstack) => ({
+      prompt: `Start ${agent.name ?? "an agent"}${pstack ? ` with pstack ${playbookOf(withoutLinks(card)).playbook ?? "poteto-mode"}` : ""} on ${branch} in a new worktree?`,
+      yes: "start",
+      run: (cx) => this.startWork({ col, row, card, branch, repo, issue, agent, pstack }, cx),
+    }), cx));
   }
 
   startWork({ col, row, card, branch, repo, issue, agent, pstack }, cx) {
@@ -683,17 +702,13 @@ export default class Kanban extends View {
       notify({ title: `${busy.name} is already on ${branch}`, body: "One agent per pull request.", level: "warning", timeout: 3000 });
       return;
     }
-    cx.spawn(async (cx) => {
-      const picked = await this.agentToStart();
-      if (!picked) return;
-      const { agent, pstack } = picked;
-      const why = sit.blockers.length ? ` (${sit.blockers.join(", ")})` : "";
-      const how = sit.mode === "drive" ? `to merge-ready${why}` : "for one status check";
-      this.askFor({
-        prompt: `Babysit #${sit.number} ${how} with ${agent.name ?? "an agent"}${pstack ? " and pstack" : ""}?`, yes: "babysit",
-        run: (cx) => this.babysit({ card, branch, repo, sit, agent, pstack }, cx),
-      }, cx);
-    });
+    const why = sit.blockers.length ? ` (${sit.blockers.join(", ")})` : "";
+    const how = sit.mode === "drive" ? `to merge-ready${why}` : "for one status check";
+    cx.spawn((cx) => this.askAgent((agent, pstack) => ({
+      prompt: `Babysit #${sit.number} ${how} with ${agent.name ?? "an agent"}${pstack ? " and pstack" : ""}?`,
+      yes: "babysit",
+      run: (cx) => this.babysit({ card, branch, repo, sit, agent, pstack }, cx),
+    }), cx));
   }
 
   babysit({ card, branch, repo, sit, agent, pstack }, cx) {
@@ -755,8 +770,8 @@ export default class Kanban extends View {
     const branch = card != null ? this.branchOf(card) : null;
     const repo = this.repoFor(this.board);
     if (!branch || !repo) { this.detail = null; return; }
-    const cwd = this.agentOf(card)?.cwd;
-    const message = cwd ? await lastAgentMessage(cwd) : null;
+    const agent = this.agentOf(card);
+    const message = agent ? await lastAgentMessage(agent) : null;
     this.detail = { branch, message, commits: await commitsAhead(repo, branch) };
   }
 
@@ -1290,7 +1305,7 @@ export default class Kanban extends View {
     if (this.palette) return line.child(keycaps(t, [["↑↓", "pick"], ["↵", "go"], ["esc", "close"]]));
     if (this.ask) {
       return line.child(div().text_color(this.ask.danger ? t.blocked : t.accent).child(this.ask.prompt))
-        .child(keycaps(t, [["y", this.ask.yes], ["any key", "cancel"]]));
+        .child(keycaps(t, [["y", this.ask.yes], ...(this.ask.next ? [["⇥", "other agent"]] : []), ["any key", "cancel"]]));
     }
     if (this.view === "notes") return line.child(keycaps(t, [["esc", "back to the board"]])).child("saved as you type");
     if (this.view === "archive") return line.child(keycaps(t, [["esc", "back to the board"]]));

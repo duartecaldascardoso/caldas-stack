@@ -77,6 +77,35 @@ export function lastMessage(jsonl) {
   return null;
 }
 
+// An agent's last answer read off its screen (`hc read`), for agents whose transcripts the board
+// can't read: { text, at: null }, or null. Every agent draws differently, so this keeps to what
+// they share: the input box at the bottom (between rules, or its prompt line) goes, and the
+// answer is what follows the last line you typed (a prompt mark: ❯, ›, > or │ >), from its last
+// message mark (⏺, •, ✦…) when the agent draws them. Tool lines, spinners and status lines go.
+const RULE = /^\s*[╭╰]?[─━—-]{20,}[╮╯]?\s*$/; // a rule, or the top or bottom of a box
+const PROMPT = /^\s*(?:│\s*)?[❯›>]\s/;
+const CHROME = /^\s*(?:[✻✶✳✢✽·⏵⎿│╭╰]|Ran \d+ |\? for shortcuts|esc to interrupt)/;
+const MARK = /^(\s*)[⏺●•✦◆]\s/;
+export function screenMessage(screen, maxLines = 200) {
+  const lines = String(screen ?? "").replace(/\x1b\[[0-9;?]*[A-Za-z]/g, "").split("\n").map((l) => l.trimEnd());
+  // The input box: everything from the first of the rules near the bottom.
+  let end = lines.length;
+  for (let i = lines.length - 1; i >= Math.max(0, lines.length - 12); i--) if (RULE.test(lines[i])) end = i;
+  // An input box without rules (Codex): the last prompt line near the bottom.
+  if (end === lines.length) {
+    for (let i = lines.length - 1; i >= Math.max(0, lines.length - 6); i--) if (PROMPT.test(lines[i])) { end = i; break; }
+  }
+  let start = end;
+  while (start > 0 && end - start < maxLines && !PROMPT.test(lines[start - 1])) start--;
+  // Agents that mark where each message starts: the last one.
+  for (let i = end - 1; i >= start; i--) if (MARK.test(lines[i])) { start = i; break; }
+  const text = lines.slice(start, end)
+    .filter((l) => !RULE.test(l) && !CHROME.test(l))
+    .map((l) => l.replace(MARK, "$1"))
+    .join("\n").replace(/\n{3,}/g, "\n\n").trim();
+  return text ? { text, at: null } : null;
+}
+
 // "just now", "4 min", "2 h", "3 d" since an ISO time; null without one.
 export function ago(iso, now = Date.now()) {
   const ms = now - Date.parse(iso ?? "");

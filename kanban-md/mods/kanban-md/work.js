@@ -159,7 +159,7 @@ export function agentsByBranch(agents, panes) {
     if (!branch) continue;
     const seen = out.get(branch);
     if (seen && URGENCY[seen.status] >= URGENCY[agent.status]) continue;
-    out.set(branch, { status: agent.status, address: agent.address, name: agent.program?.name || agent.app || "Agent", cwd: byPane.get(agent.pane)?.cwd ?? null });
+    out.set(branch, { status: agent.status, address: agent.address, app: agent.app, name: agent.program?.name || agent.app || "Agent", cwd: byPane.get(agent.pane)?.cwd ?? null });
   }
   return out;
 }

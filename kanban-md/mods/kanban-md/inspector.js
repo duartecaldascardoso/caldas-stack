@@ -119,7 +119,7 @@ function agentBox(t, agent, message, col) {
       .child(div().flex_1())
       .when(Boolean(when), (el) => el.child(div().text_size(11).text_color(t.dim).child(when === "just now" ? when : `${when} ago`))))
     .when(!sum, (el) => el.child(div().text_size(12).text_color(t.dim).whitespace_normal()
-      .child("No message yet, or this agent keeps no Claude Code transcript.")))
+      .child("No message from it yet.")))
     .when(Boolean(sum && agent?.status === "blocked" && sum.question), (el) => el.child(v_flex().gap(4).px(10).py(8).rounded(6)
       .bg(alpha(t.blocked, "1f")).border_1().border_color(alpha(t.blocked, "55"))
       .child(div().text_size(10.5).font_medium().text_color(t.blocked).child("NEEDS YOU"))

@@ -85,8 +85,9 @@ test("agentsByBranch joins agents to their pane's branch, most urgent first", ()
   ];
   const panes = [{ pane: "p1", branch: "feature/pricing" }, { pane: "p2", branch: "feature/pricing" }, { pane: "p3", branch: "main" }, { pane: "p4", branch: null }];
   const by = agentsByBranch(agents, panes);
-  assert.deepEqual(by.get("feature/pricing"), { status: "blocked", address: "t2", name: "Claude Code", cwd: null });
+  assert.deepEqual(by.get("feature/pricing"), { status: "blocked", address: "t2", app: undefined, name: "Claude Code", cwd: null });
   assert.equal(by.get("main").name, "pi");
+  assert.equal(by.get("main").app, "pi");
   assert.equal(by.size, 2);
 });
 
