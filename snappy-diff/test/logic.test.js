@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { parsePatch, untrackedPatch, firstChange } from "../mods/snappy-diff/patch.js";
 import { wordDiff } from "../mods/snappy-diff/words.js";
 import { languageOf, highlight } from "../mods/snappy-diff/syntax.js";
-import { fileRows, wrapCount, wrapLines, segments } from "../mods/snappy-diff/rows.js";
+import { fileRows, wrapCount, wrapLines, segments, tokensOf, marksOf } from "../mods/snappy-diff/rows.js";
 import { treeRows, diffstat, fileMatches, kindOf } from "../mods/snappy-diff/tree.js";
 import { toggleViewed, isViewed, emptyReview, linesText, withStatus, reviewPrompt } from "../mods/snappy-diff/review.js";
 
@@ -118,10 +118,23 @@ test("fileRows pairs removed and added lines side by side", () => {
   const changed = rows[1];
   assert.equal(changed.left.text, "const b = 2;");
   assert.equal(changed.right.text, "const b = 3;");
-  assert.deepEqual(changed.right.marks, [[10, 11]]);
+  assert.deepEqual(marksOf(changed.right), [[10, 11]]);
+  assert.deepEqual(marksOf(changed.left), [[10, 11]]);
+  assert.equal(tokensOf(changed.right)[0].kind, "keyword");
   assert.equal(rows[2].left, null);
   assert.equal(rows[2].right.n, 3);
   assert.equal(rows[5].hidden, 5);
+});
+
+test("fileRows leaves highlighting and word changes until a line is drawn", () => {
+  const app = parsePatch(PATCH)[0];
+  const rows = fileRows(app, "split", languageOf(app.name));
+  const context = rows[0];
+  assert.equal(context.right.lazy.tokens, undefined);
+  assert.equal(context.left.lazy, context.right.lazy); // one line, drawn on both sides
+  tokensOf(context.left);
+  assert.notEqual(context.right.lazy.tokens, undefined);
+  assert.equal(rows[1].right.lazy.marks, undefined);
 });
 
 test("fileRows in unified style lists removals before additions", () => {

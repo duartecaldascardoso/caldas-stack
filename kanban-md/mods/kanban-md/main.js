@@ -49,11 +49,14 @@ const KEYS = {
   "t": "go-to-agent", "shift-a": "archive", "cmd-k": "palette", "/": "palette",
   "1": "column-1", "2": "column-2", "3": "column-3", "4": "column-4", "5": "column-5",
 };
+// The board's pages, in the order ⌥⇥ steps through them. Both spellings of the modifiers.
+const PAGES = ["board", "notes", "archive", "setup"];
+const PAGE_KEYS = { "alt-tab": 1, "alt-shift-tab": -1, "shift-alt-tab": -1 };
 
 // Every key, grouped, for How it works. The hint line only offers the selected card's next
 // steps; ⌘K lists every action with its key.
 const KEY_GUIDE = [
-  ["Move", [["←→↑↓", "between cards"], ["hjkl", "the same"], ["1–5", "to a column"], ["⇧ + move", "the card"], ["[ ]", "other boards"]]],
+  ["Move", [["←→↑↓", "between cards"], ["hjkl", "the same"], ["1–5", "to a column"], ["⇧ + move", "the card"], ["⇥ ⇧⇥", "other boards"], ["⌥⇥", "next page"]]],
   ["Cards", [["n", "new card"], ["e ↵", "edit"], ["d", "delete"], ["⌘Z", "undo"], ["⌘⇧Z", "redo"], ["⇧A", "archive shipped"]]],
   ["Work", [["s", "start work"], ["t", "go to agent"], ["i", "inspect"], ["g", "open diff or issue"], ["@", "link branch"], ["o", "open pull request"], ["⇧B", "babysit"], ["f", "fix CI"]]],
   ["Board", [["⌘K /", "go to, all actions"], ["⇧N", "notes"], ["⇧I", "import issues"], ["b", "new board"], ["p", "project board"], ["⇧D", "delete board"], ["?", "this page"]]],
@@ -259,6 +262,15 @@ export default class Kanban extends View {
     this.openBoard(this.boards[(i + step + n) % n], cx);
   }
 
+  cyclePage(step, cx) {
+    const i = Math.max(0, PAGES.indexOf(this.view));
+    const page = PAGES[(i + step + PAGES.length) % PAGES.length];
+    if (page === "board") this.showBoard(cx);
+    else if (page === "notes") this.showNotesPage(cx);
+    else if (page === "archive") this.showArchivePage(cx);
+    else this.showSetupPage(cx);
+  }
+
   createBoard(name, cx) {
     if (!this.boards.includes(name)) {
       this.boards = [...this.boards, name].sort();
@@ -374,6 +386,11 @@ export default class Kanban extends View {
     }
     if (this.view === "setup" && this.setupPage.key(event.keystroke, KEYS[event.keystroke], cx)) { cx.stop_propagation(); return; }
     if (event.keystroke === "cmd-k") { this.openPalette(cx); cx.stop_propagation(); return; }
+    // Pages and boards change from any page, the inspector included. ⌥⇥ works in the notes too;
+    // the other board keys are typing there.
+    if (PAGE_KEYS[event.keystroke]) { this.cyclePage(PAGE_KEYS[event.keystroke], cx); cx.stop_propagation(); return; }
+    const step = { "prev-board": -1, "next-board": 1 }[KEYS[event.keystroke]];
+    if (step && !this.editing && this.view !== "notes") { this.cycleBoard(step, cx); cx.stop_propagation(); return; }
     if (this.view !== "board") {
       if (event.key === "escape") { this.showBoard(cx); cx.stop_propagation(); }
       return;
@@ -1292,8 +1309,8 @@ export default class Kanban extends View {
       return line.child(div().text_color(this.ask.danger ? t.blocked : t.accent).child(this.ask.prompt))
         .child(keycaps(t, [["y", this.ask.yes], ["any key", "cancel"]]));
     }
-    if (this.view === "notes") return line.child(keycaps(t, [["esc", "back to the board"]])).child("saved as you type");
-    if (this.view === "archive") return line.child(keycaps(t, [["esc", "back to the board"]]));
+    if (this.view === "notes") return line.child(keycaps(t, [["⌥⇥", "next page"], ["esc", "back to the board"]])).child("saved as you type");
+    if (this.view === "archive") return line.child(keycaps(t, [["⇥", "next board"], ["⌥⇥", "next page"], ["esc", "back to the board"]]));
     if (this.view === "setup") return line.child(keycaps(t, this.setupPage.hints()));
     if (this.inspecting === "help") return line.child(keycaps(t, [["↑↓", "playbook"], ["esc", "back to the board"]]));
     if (this.inspecting) return line.child(keycaps(t, [["←→↑↓", "other cards"], ["esc", "back to the board"]]));
